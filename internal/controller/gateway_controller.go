@@ -74,6 +74,12 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 	target := provisioner.Resolve(&gw, proxy, r.DataPlaneNamespace)
 
+	// Merged Gateways share one data plane for the whole GatewayClass and have
+	// their own provisioning and cleanup lifecycle.
+	if target.Merged {
+		return r.reconcileMerged(ctx, &gw, proxy, target)
+	}
+
 	// Handle deletion: tear down Dedicated-mode resources, then release the
 	// finalizer. Gateway-namespace resources are garbage collected by owner
 	// references and need no finalizer.
@@ -117,7 +123,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
-	r.writeStatus(&gw, svc, dep, nodeAddrs)
+	r.writeStatus(&gw, svc, dep, nodeAddrs, nil)
 	if err := r.Status().Update(ctx, &gw); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -166,7 +172,11 @@ func (r *GatewayReconciler) finalize(ctx context.Context, gw *gwapiv1.Gateway) e
 // cleanup deletes the data plane resources provisioned for a Gateway in the
 // given namespace. The resource set is a single named object of each kind.
 func (r *GatewayReconciler) cleanup(ctx context.Context, gw *gwapiv1.Gateway, namespace string) error {
-	name := provisioner.ResourceName(gw)
+	return r.deleteSet(ctx, namespace, provisioner.ResourceName(gw))
+}
+
+// deleteSet deletes the named data plane resource set in a namespace.
+func (r *GatewayReconciler) deleteSet(ctx context.Context, namespace, name string) error {
 	om := metav1.ObjectMeta{Name: name, Namespace: namespace}
 	for _, obj := range []client.Object{
 		&appsv1.Deployment{ObjectMeta: om},
@@ -335,10 +345,13 @@ func (r *GatewayReconciler) writeUnsupportedAddress(gw *gwapiv1.Gateway) {
 		Message:            "Gateway not accepted",
 		ObservedGeneration: gw.Generation,
 	})
-	gw.Status.Listeners = r.listenerStatus(gw, metav1.ConditionFalse)
+	gw.Status.Listeners = r.listenerStatus(gw, metav1.ConditionFalse, nil)
 }
 
-func (r *GatewayReconciler) writeStatus(gw *gwapiv1.Gateway, svc *corev1.Service, dep *appsv1.Deployment, nodeAddrs []string) {
+// writeStatus derives and writes the Gateway status. conflicts is the global
+// merged-listener conflict map (nil for non-merged Gateways); it is filtered to
+// this Gateway's listeners.
+func (r *GatewayReconciler) writeStatus(gw *gwapiv1.Gateway, svc *corev1.Service, dep *appsv1.Deployment, nodeAddrs []string, conflicts map[provisioner.ListenerRef]gwapiv1.ListenerConditionReason) {
 	res := status.Derive(gw, svc, dep, nodeAddrs)
 	gw.Status.Addresses = res.Addresses
 
@@ -362,12 +375,29 @@ func (r *GatewayReconciler) writeStatus(gw *gwapiv1.Gateway, svc *corev1.Service
 		ObservedGeneration: gw.Generation,
 	})
 
-	gw.Status.Listeners = r.listenerStatus(gw, progStatus)
+	gw.Status.Listeners = r.listenerStatus(gw, progStatus, localConflicts(gw, conflicts))
 }
 
-// listenerStatus reports a minimal per-listener status. Full route attachment
-// accounting is delegated to the data plane provider in a later phase.
-func (r *GatewayReconciler) listenerStatus(gw *gwapiv1.Gateway, prog metav1.ConditionStatus) []gwapiv1.ListenerStatus {
+// localConflicts narrows the global conflict map to a single Gateway's
+// listeners.
+func localConflicts(gw *gwapiv1.Gateway, conflicts map[provisioner.ListenerRef]gwapiv1.ListenerConditionReason) map[gwapiv1.SectionName]gwapiv1.ListenerConditionReason {
+	if len(conflicts) == 0 {
+		return nil
+	}
+	local := map[gwapiv1.SectionName]gwapiv1.ListenerConditionReason{}
+	for ref, reason := range conflicts {
+		if ref.GatewayNamespace == gw.Namespace && ref.GatewayName == gw.Name {
+			local[ref.Listener] = reason
+		}
+	}
+	return local
+}
+
+// listenerStatus reports a per-listener status. Full route attachment
+// accounting is delegated to the data plane provider in a later phase. The
+// conflicts map, keyed by listener name, marks listeners that conflict with
+// another listener of the same merged GatewayClass.
+func (r *GatewayReconciler) listenerStatus(gw *gwapiv1.Gateway, prog metav1.ConditionStatus, conflicts map[gwapiv1.SectionName]gwapiv1.ListenerConditionReason) []gwapiv1.ListenerStatus {
 	out := make([]gwapiv1.ListenerStatus, 0, len(gw.Spec.Listeners))
 	for _, l := range gw.Spec.Listeners {
 		ls := gwapiv1.ListenerStatus{
@@ -383,6 +413,17 @@ func (r *GatewayReconciler) listenerStatus(gw *gwapiv1.Gateway, prog metav1.Cond
 				ObservedGeneration: gw.Generation,
 			})
 		}
+
+		if reason, conflicted := conflicts[l.Name]; conflicted {
+			set(string(gwapiv1.ListenerConditionConflicted), metav1.ConditionTrue, string(reason))
+			set(string(gwapiv1.ListenerConditionAccepted), metav1.ConditionTrue, string(gwapiv1.ListenerReasonAccepted))
+			set(string(gwapiv1.ListenerConditionResolvedRefs), metav1.ConditionTrue, string(gwapiv1.ListenerReasonResolvedRefs))
+			set(string(gwapiv1.ListenerConditionProgrammed), metav1.ConditionFalse, string(gwapiv1.ListenerReasonInvalid))
+			out = append(out, ls)
+			continue
+		}
+
+		set(string(gwapiv1.ListenerConditionConflicted), metav1.ConditionFalse, string(gwapiv1.ListenerReasonNoConflicts))
 		set(string(gwapiv1.ListenerConditionAccepted), metav1.ConditionTrue, string(gwapiv1.ListenerReasonAccepted))
 		set(string(gwapiv1.ListenerConditionResolvedRefs), metav1.ConditionTrue, string(gwapiv1.ListenerReasonResolvedRefs))
 		progReason := string(gwapiv1.ListenerReasonProgrammed)

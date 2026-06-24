@@ -3,6 +3,7 @@ package provisioner
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -21,35 +22,87 @@ type ResourceSet struct {
 	Service        *corev1.Service
 }
 
-// Render builds the desired data plane resource set for a Gateway, applying the
-// resolved TraefikProxy configuration. Resources are rendered in namespace.
-// Owner references are set by the caller.
-func Render(gw *gwapiv1.Gateway, proxy *v1alpha1.TraefikProxy, namespace string) *ResourceSet {
-	name := ResourceName(gw)
-	ports := listenerPorts(gw)
+// buildParams describes a data plane resource set to render. It is shared by
+// the single Gateway and merged Gateway rendering paths.
+type buildParams struct {
+	name        string
+	namespace   string
+	selector    map[string]string
+	labels      map[string]string // applied to every resource (includes selector)
+	annotations map[string]string
+	ports       []int32
+	refs        []string // gateway scoping references "namespace/name"
+	proxy       *v1alpha1.TraefikProxy
+}
 
-	sa := &corev1.ServiceAccount{
-		ObjectMeta: objectMeta(gw, name, namespace),
+// Render builds the desired data plane resource set for a single Gateway,
+// applying the resolved TraefikProxy configuration. Resources are rendered in
+// namespace. Owner references are set by the caller.
+func Render(gw *gwapiv1.Gateway, proxy *v1alpha1.TraefikProxy, namespace string) *ResourceSet {
+	set := build(buildParams{
+		name:        ResourceName(gw),
+		namespace:   namespace,
+		selector:    SelectorLabels(gw),
+		labels:      commonLabels(gw),
+		annotations: infraAnnotations(gw),
+		ports:       listenerPorts(gw),
+		refs:        []string{gw.Namespace + "/" + gw.Name},
+		proxy:       proxy,
+	})
+	if proxy != nil && proxy.Spec.Service != nil {
+		set.Service.Annotations = mergeMaps(set.Service.Annotations, proxy.Spec.Service.Annotations)
+	}
+	applyStaticAddresses(set.Service, gw)
+	return set
+}
+
+// RenderMerged builds the single data plane resource set shared by all Gateways
+// of a merged GatewayClass. Listener ports are the union across the merged
+// Gateways and the data plane is scoped to all of them.
+func RenderMerged(class string, gateways []*gwapiv1.Gateway, proxy *v1alpha1.TraefikProxy, namespace string) *ResourceSet {
+	selector := map[string]string{
+		MergeGroupLabel: class,
+		ManagedByLabel:  ManagedByValue,
+	}
+	return build(buildParams{
+		name:      MergedResourceName(class),
+		namespace: namespace,
+		selector:  selector,
+		labels:    selector,
+		ports:     mergedPorts(gateways),
+		refs:      gatewayRefs(gateways),
+		proxy:     proxy,
+	})
+}
+
+func build(p buildParams) *ResourceSet {
+	om := metav1.ObjectMeta{
+		Name:        p.name,
+		Namespace:   p.namespace,
+		Labels:      p.labels,
+		Annotations: p.annotations,
 	}
 
+	sa := &corev1.ServiceAccount{ObjectMeta: om}
+
 	dep := &appsv1.Deployment{
-		ObjectMeta: objectMeta(gw, name, namespace),
+		ObjectMeta: om,
 		Spec: appsv1.DeploymentSpec{
-			Replicas: replicas(proxy),
-			Selector: &metav1.LabelSelector{MatchLabels: selectorLabels(gw)},
+			Replicas: replicas(p.proxy),
+			Selector: &metav1.LabelSelector{MatchLabels: p.selector},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels:      mergeMaps(selectorLabels(gw), podLabels(proxy)),
-					Annotations: podAnnotations(proxy),
+					Labels:      mergeMaps(p.selector, podLabels(p.proxy)),
+					Annotations: podAnnotations(p.proxy),
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: name,
+					ServiceAccountName: p.name,
 					Containers: []corev1.Container{{
 						Name:      "traefik",
-						Image:     image(proxy),
-						Args:      containerArgs(gw, ports),
-						Ports:     containerPorts(ports),
-						Resources: resources(proxy),
+						Image:     image(p.proxy),
+						Args:      containerArgs(p.refs, p.ports),
+						Ports:     containerPorts(p.ports),
+						Resources: resources(p.proxy),
 					}},
 				},
 			},
@@ -57,17 +110,41 @@ func Render(gw *gwapiv1.Gateway, proxy *v1alpha1.TraefikProxy, namespace string)
 	}
 
 	svc := &corev1.Service{
-		ObjectMeta: serviceObjectMeta(gw, name, namespace, proxy),
+		ObjectMeta: om,
 		Spec: corev1.ServiceSpec{
-			Type:              serviceType(proxy),
-			Selector:          selectorLabels(gw),
-			Ports:             servicePorts(ports),
-			LoadBalancerClass: loadBalancerClass(proxy),
+			Type:              serviceType(p.proxy),
+			Selector:          p.selector,
+			Ports:             servicePorts(p.ports),
+			LoadBalancerClass: loadBalancerClass(p.proxy),
 		},
 	}
-	applyStaticAddresses(svc, gw)
 
 	return &ResourceSet{ServiceAccount: sa, Deployment: dep, Service: svc}
+}
+
+func mergedPorts(gateways []*gwapiv1.Gateway) []int32 {
+	seen := map[int32]struct{}{}
+	var ports []int32
+	for _, gw := range gateways {
+		for _, p := range listenerPorts(gw) {
+			if _, ok := seen[p]; ok {
+				continue
+			}
+			seen[p] = struct{}{}
+			ports = append(ports, p)
+		}
+	}
+	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
+	return ports
+}
+
+func gatewayRefs(gateways []*gwapiv1.Gateway) []string {
+	refs := make([]string, 0, len(gateways))
+	for _, gw := range gateways {
+		refs = append(refs, gw.Namespace+"/"+gw.Name)
+	}
+	sort.Strings(refs)
+	return refs
 }
 
 // applyStaticAddresses requests the Gateway spec.addresses on the provisioned
@@ -91,23 +168,6 @@ func applyStaticAddresses(svc *corev1.Service, gw *gwapiv1.Gateway) {
 	if svc.Spec.Type == corev1.ServiceTypeLoadBalancer {
 		svc.Spec.LoadBalancerIP = ips[0]
 	}
-}
-
-func objectMeta(gw *gwapiv1.Gateway, name, namespace string) metav1.ObjectMeta {
-	return metav1.ObjectMeta{
-		Name:        name,
-		Namespace:   namespace,
-		Labels:      commonLabels(gw),
-		Annotations: infraAnnotations(gw),
-	}
-}
-
-func serviceObjectMeta(gw *gwapiv1.Gateway, name, namespace string, proxy *v1alpha1.TraefikProxy) metav1.ObjectMeta {
-	m := objectMeta(gw, name, namespace)
-	if proxy != nil && proxy.Spec.Service != nil {
-		m.Annotations = mergeMaps(m.Annotations, proxy.Spec.Service.Annotations)
-	}
-	return m
 }
 
 // commonLabels carries the operator markers plus the propagated
@@ -134,10 +194,6 @@ func SelectorLabels(gw *gwapiv1.Gateway) map[string]string {
 	}
 }
 
-func selectorLabels(gw *gwapiv1.Gateway) map[string]string {
-	return SelectorLabels(gw)
-}
-
 // infraAnnotations carries the propagated spec.infrastructure.annotations.
 func infraAnnotations(gw *gwapiv1.Gateway) map[string]string {
 	if gw.Spec.Infrastructure == nil || len(gw.Spec.Infrastructure.Annotations) == 0 {
@@ -151,13 +207,13 @@ func infraAnnotations(gw *gwapiv1.Gateway) map[string]string {
 }
 
 // containerArgs builds the data plane Traefik arguments. The kubernetesGateway
-// provider is scoped to the single Gateway and told not to write Gateway status
-// (the operator is the single writer). Both flags are provided by the in-tree
-// provider, see DESIGN.md section 8.
-func containerArgs(gw *gwapiv1.Gateway, ports []int32) []string {
+// provider is scoped to the given Gateway references and told not to write
+// Gateway status (the operator is the single writer). Both flags are provided
+// by the in-tree provider, see DESIGN.md section 8.
+func containerArgs(refs []string, ports []int32) []string {
 	args := []string{
 		"--providers.kubernetesGateway=true",
-		fmt.Sprintf("--providers.kubernetesGateway.gateway=%s/%s", gw.Namespace, gw.Name),
+		fmt.Sprintf("--providers.kubernetesGateway.gateway=%s", strings.Join(refs, ",")),
 		"--providers.kubernetesGateway.disableGatewayStatus=true",
 	}
 	for _, p := range ports {

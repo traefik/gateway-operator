@@ -23,6 +23,9 @@ const (
 	// plane lives in one namespace.
 	GatewayNamespaceLabel = "gateway.traefik.io/gateway-namespace"
 
+	// MergeGroupLabel identifies the shared data plane of a merged GatewayClass.
+	MergeGroupLabel = "gateway.traefik.io/merge-group"
+
 	// ManagedByLabel marks resources owned by the operator.
 	ManagedByLabel = "app.kubernetes.io/managed-by"
 
@@ -42,6 +45,20 @@ func ResourceName(gw *gwapiv1.Gateway) string {
 	suffix := hex.EncodeToString(sum[:])[:8]
 
 	const maxBase = 63 - 1 - 8 // 63 DNS label limit, dash, 8 hash chars.
+	if len(base) > maxBase {
+		base = base[:maxBase]
+	}
+	return base + "-" + suffix
+}
+
+// MergedResourceName returns the deterministic name of the shared data plane
+// provisioned for all Gateways of a merged GatewayClass.
+func MergedResourceName(class string) string {
+	base := "traefik-merged-" + class
+	sum := sha256.Sum256([]byte("merged/" + class))
+	suffix := hex.EncodeToString(sum[:])[:8]
+
+	const maxBase = 63 - 1 - 8
 	if len(base) > maxBase {
 		base = base[:maxBase]
 	}

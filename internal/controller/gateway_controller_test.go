@@ -177,3 +177,91 @@ func TestReconcile_DedicatedModeLifecycle(t *testing.T) {
 		t.Fatalf("expected gateway removed after finalizer release, got %v", err)
 	}
 }
+
+func TestReconcile_MergedGateways(t *testing.T) {
+	s := testScheme(t)
+	ref := &gwapiv1.ParametersReference{
+		Group: gwapiv1.Group(v1alpha1.GroupVersion.Group),
+		Kind:  "TraefikProxy",
+		Name:  "dp",
+	}
+	gc := gatewayClass("traefik", ref)
+	proxy := &v1alpha1.TraefikProxy{
+		ObjectMeta: metav1.ObjectMeta{Name: "dp"},
+		Spec: v1alpha1.TraefikProxySpec{
+			MergeGateways: true,
+			Provisioning:  &v1alpha1.ProvisioningConfig{Namespace: "traefik-system"},
+		},
+	}
+	g1 := testGateway("app1", "g1", "traefik")
+	g2 := testGateway("app2", "g2", "traefik")
+
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(gc, proxy, g1, g2).
+		WithStatusSubresource(&gwapiv1.Gateway{}).
+		Build()
+
+	r := &GatewayReconciler{Client: cl, DataPlaneNamespace: "fallback"}
+	reconcile(t, r, g1)
+	reconcile(t, r, g2)
+
+	ctx := context.Background()
+	shared := provisioner.MergedResourceName("traefik")
+
+	// A single shared data plane exists in the merge namespace.
+	var dep appsv1.Deployment
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "traefik-system", Name: shared}, &dep); err != nil {
+		t.Fatalf("expected shared deployment: %v", err)
+	}
+	if dep.Labels[provisioner.MergeGroupLabel] != "traefik" {
+		t.Fatalf("expected merge-group label, got %q", dep.Labels[provisioner.MergeGroupLabel])
+	}
+
+	// No per-Gateway data planes were created.
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app1", Name: provisioner.ResourceName(g1)}, &appsv1.Deployment{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("did not expect a per-gateway deployment, got %v", err)
+	}
+
+	// Both Gateways carry the finalizer.
+	for _, key := range []types.NamespacedName{{Namespace: "app1", Name: "g1"}, {Namespace: "app2", Name: "g2"}} {
+		var got gwapiv1.Gateway
+		if err := cl.Get(ctx, key, &got); err != nil {
+			t.Fatal(err)
+		}
+		if !controllerutil.ContainsFinalizer(&got, dataPlaneFinalizer) {
+			t.Fatalf("expected finalizer on %s", key)
+		}
+	}
+
+	// Delete g1: the shared data plane survives because g2 remains.
+	var got1 gwapiv1.Gateway
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app1", Name: "g1"}, &got1); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Delete(ctx, &got1); err != nil {
+		t.Fatal(err)
+	}
+	reconcile(t, r, g1)
+
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "traefik-system", Name: shared}, &appsv1.Deployment{}); err != nil {
+		t.Fatalf("shared deployment should survive while g2 remains: %v", err)
+	}
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app1", Name: "g1"}, &gwapiv1.Gateway{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected g1 removed, got %v", err)
+	}
+
+	// Delete g2: the last member leaves, so the shared data plane is torn down.
+	var got2 gwapiv1.Gateway
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app2", Name: "g2"}, &got2); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Delete(ctx, &got2); err != nil {
+		t.Fatal(err)
+	}
+	reconcile(t, r, g2)
+
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "traefik-system", Name: shared}, &appsv1.Deployment{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected shared deployment torn down, got %v", err)
+	}
+}
