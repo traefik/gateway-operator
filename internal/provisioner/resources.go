@@ -65,8 +65,32 @@ func Render(gw *gwapiv1.Gateway, proxy *v1alpha1.TraefikProxy) *ResourceSet {
 			LoadBalancerClass: loadBalancerClass(proxy),
 		},
 	}
+	applyStaticAddresses(svc, gw)
 
 	return &ResourceSet{ServiceAccount: sa, Deployment: dep, Service: svc}
+}
+
+// applyStaticAddresses requests the Gateway spec.addresses on the provisioned
+// Service. IP addresses are set as ExternalIPs (works for every Service type
+// and supports multiple addresses); for a LoadBalancer the first IP is also set
+// as the legacy LoadBalancerIP for clouds that honor it. Hostname addresses are
+// not bindable on a Service and are left for the status logic to report as not
+// usable. Only supported address types are rendered.
+func applyStaticAddresses(svc *corev1.Service, gw *gwapiv1.Gateway) {
+	var ips []string
+	for _, a := range gw.Spec.Addresses {
+		if a.Type != nil && *a.Type != gwapiv1.IPAddressType {
+			continue
+		}
+		ips = append(ips, a.Value)
+	}
+	if len(ips) == 0 {
+		return
+	}
+	svc.Spec.ExternalIPs = ips
+	if svc.Spec.Type == corev1.ServiceTypeLoadBalancer {
+		svc.Spec.LoadBalancerIP = ips[0]
+	}
 }
 
 func objectMeta(gw *gwapiv1.Gateway, name string) metav1.ObjectMeta {

@@ -30,6 +30,7 @@ type GatewayReconciler struct {
 // +kubebuilder:rbac:groups=gateway.traefik.io,resources=traefikproxies,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 
 // Reconcile provisions the data plane for a Gateway and writes its status.
 func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -43,6 +44,16 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 	if !owned {
+		return ctrl.Result{}, nil
+	}
+
+	// Reject Gateways requesting an address type the operator cannot honor,
+	// without provisioning any data plane for them.
+	if !status.AllAddressesSupported(&gw) {
+		r.writeUnsupportedAddress(&gw)
+		if err := r.Status().Update(ctx, &gw); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -61,7 +72,12 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
-	r.writeStatus(&gw, svc, dep)
+	nodeAddrs, err := r.nodeAddresses(ctx, svc)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	r.writeStatus(&gw, svc, dep, nodeAddrs)
 	if err := r.Status().Update(ctx, &gw); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -118,6 +134,8 @@ func (r *GatewayReconciler) applySet(ctx context.Context, gw *gwapiv1.Gateway, s
 		set.Service.Spec.Selector = desiredSvc.Spec.Selector
 		set.Service.Spec.Ports = desiredSvc.Spec.Ports
 		set.Service.Spec.LoadBalancerClass = desiredSvc.Spec.LoadBalancerClass
+		set.Service.Spec.ExternalIPs = desiredSvc.Spec.ExternalIPs
+		set.Service.Spec.LoadBalancerIP = desiredSvc.Spec.LoadBalancerIP
 		set.Service.Labels = desiredSvc.Labels
 		set.Service.Annotations = desiredSvc.Annotations
 	}); err != nil {
@@ -160,8 +178,67 @@ func (r *GatewayReconciler) observe(ctx context.Context, gw *gwapiv1.Gateway, se
 	return svcPtr, depPtr, nil
 }
 
-func (r *GatewayReconciler) writeStatus(gw *gwapiv1.Gateway, svc *corev1.Service, dep *appsv1.Deployment) {
-	res := status.Derive(gw, svc, dep)
+// nodeAddresses lists node addresses used to populate the status of a NodePort
+// Service. It returns nil for other Service types.
+func (r *GatewayReconciler) nodeAddresses(ctx context.Context, svc *corev1.Service) ([]string, error) {
+	if svc == nil || svc.Spec.Type != corev1.ServiceTypeNodePort {
+		return nil, nil
+	}
+	var nodes corev1.NodeList
+	if err := r.List(ctx, &nodes); err != nil {
+		return nil, err
+	}
+	var addrs []string
+	for i := range nodes.Items {
+		var internal string
+		for _, a := range nodes.Items[i].Status.Addresses {
+			switch a.Type {
+			case corev1.NodeExternalIP:
+				addrs = append(addrs, a.Address)
+			case corev1.NodeInternalIP:
+				internal = a.Address
+			}
+		}
+		// Fall back to the internal IP when no external IP is advertised.
+		if internal != "" && !contains(addrs, internal) {
+			addrs = append(addrs, internal)
+		}
+	}
+	return addrs, nil
+}
+
+func contains(s []string, v string) bool {
+	for _, e := range s {
+		if e == v {
+			return true
+		}
+	}
+	return false
+}
+
+// writeUnsupportedAddress marks a Gateway not accepted because it requests an
+// address type the operator does not support.
+func (r *GatewayReconciler) writeUnsupportedAddress(gw *gwapiv1.Gateway) {
+	gw.Status.Addresses = nil
+	meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{
+		Type:               string(gwapiv1.GatewayConditionAccepted),
+		Status:             metav1.ConditionFalse,
+		Reason:             string(gwapiv1.GatewayReasonUnsupportedAddress),
+		Message:            "Gateway requests an unsupported address type",
+		ObservedGeneration: gw.Generation,
+	})
+	meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{
+		Type:               string(gwapiv1.GatewayConditionProgrammed),
+		Status:             metav1.ConditionFalse,
+		Reason:             string(gwapiv1.GatewayReasonInvalid),
+		Message:            "Gateway not accepted",
+		ObservedGeneration: gw.Generation,
+	})
+	gw.Status.Listeners = r.listenerStatus(gw, metav1.ConditionFalse)
+}
+
+func (r *GatewayReconciler) writeStatus(gw *gwapiv1.Gateway, svc *corev1.Service, dep *appsv1.Deployment, nodeAddrs []string) {
+	res := status.Derive(gw, svc, dep, nodeAddrs)
 	gw.Status.Addresses = res.Addresses
 
 	meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{

@@ -13,6 +13,33 @@ import (
 // behavior of Envoy Gateway.
 const maxAddresses = 16
 
+// SupportedAddressType reports whether the operator can honor a Gateway
+// spec.address of the given type. Unsupported types make the Gateway
+// Accepted=False with reason UnsupportedAddress.
+func SupportedAddressType(t *gwapiv1.AddressType) bool {
+	if t == nil {
+		// A nil type defaults to IPAddress per the Gateway API.
+		return true
+	}
+	switch *t {
+	case gwapiv1.IPAddressType, gwapiv1.HostnameAddressType:
+		return true
+	default:
+		return false
+	}
+}
+
+// AllAddressesSupported reports whether every requested address has a supported
+// type.
+func AllAddressesSupported(gw *gwapiv1.Gateway) bool {
+	for _, a := range gw.Spec.Addresses {
+		if !SupportedAddressType(a.Type) {
+			return false
+		}
+	}
+	return true
+}
+
 // ProgrammedResult is the outcome of deriving addresses and readiness.
 type ProgrammedResult struct {
 	Addresses  []gwapiv1.GatewayStatusAddress
@@ -22,12 +49,11 @@ type ProgrammedResult struct {
 }
 
 // Derive computes the Gateway status addresses and Programmed outcome from the
-// provisioned Service and Deployment. svc or dep may be nil when not yet created.
-func Derive(gw *gwapiv1.Gateway, svc *corev1.Service, dep *appsv1.Deployment) ProgrammedResult {
+// provisioned Service and Deployment. svc or dep may be nil when not yet
+// created. nodeAddrs supplies node addresses used for NodePort Services.
+func Derive(gw *gwapiv1.Gateway, svc *corev1.Service, dep *appsv1.Deployment, nodeAddrs []string) ProgrammedResult {
 	specAddrs := gw.Spec.Addresses
 
-	// Service not created yet but the user requested addresses: surface them and
-	// mark the Gateway not usable.
 	if svc == nil {
 		if len(specAddrs) > 0 {
 			return ProgrammedResult{
@@ -44,16 +70,11 @@ func Derive(gw *gwapiv1.Gateway, svc *corev1.Service, dep *appsv1.Deployment) Pr
 		}
 	}
 
-	var addrs []gwapiv1.GatewayStatusAddress
 	if len(specAddrs) > 0 {
-		// Static addresses requested: report the externalIPs / clusterIPs the
-		// Service is bound to.
-		addrs = fromStaticService(svc, specAddrs)
-	} else {
-		addrs = fromService(svc)
+		return deriveStatic(gw, svc, dep, nodeAddrs)
 	}
-	addrs = cap16(addrs)
 
+	addrs := cap16(fromService(svc, nodeAddrs))
 	if len(addrs) == 0 {
 		return ProgrammedResult{
 			Programmed: false,
@@ -61,7 +82,6 @@ func Derive(gw *gwapiv1.Gateway, svc *corev1.Service, dep *appsv1.Deployment) Pr
 			Message:    "No address assigned to the data plane Service",
 		}
 	}
-
 	if !deploymentReady(dep) {
 		return ProgrammedResult{
 			Addresses:  addrs,
@@ -70,7 +90,6 @@ func Derive(gw *gwapiv1.Gateway, svc *corev1.Service, dep *appsv1.Deployment) Pr
 			Message:    "Data plane has no ready replicas",
 		}
 	}
-
 	return ProgrammedResult{
 		Addresses:  addrs,
 		Programmed: true,
@@ -79,7 +98,86 @@ func Derive(gw *gwapiv1.Gateway, svc *corev1.Service, dep *appsv1.Deployment) Pr
 	}
 }
 
-func fromService(svc *corev1.Service) []gwapiv1.GatewayStatusAddress {
+// deriveStatic handles user requested static addresses. A requested address is
+// reported only once the provisioned Service has actually realized it (the
+// LoadBalancer assigned it, or it is bound as an external/cluster/node address).
+// Any requested address that is not realized leaves the Gateway not Programmed
+// with reason AddressNotUsable.
+func deriveStatic(gw *gwapiv1.Gateway, svc *corev1.Service, dep *appsv1.Deployment, nodeAddrs []string) ProgrammedResult {
+	realized := realizedSet(svc, nodeAddrs)
+
+	var bound []gwapiv1.GatewayStatusAddress
+	allUsable := true
+	for _, a := range gw.Spec.Addresses {
+		t := gwapiv1.IPAddressType
+		if a.Type != nil {
+			t = *a.Type
+		}
+		if realized[a.Value] {
+			bound = append(bound, addr(t, a.Value))
+		} else {
+			allUsable = false
+		}
+	}
+	bound = cap16(bound)
+
+	if len(bound) == 0 || !allUsable {
+		return ProgrammedResult{
+			Addresses:  bound,
+			Programmed: false,
+			Reason:     gwapiv1.GatewayReasonAddressNotUsable,
+			Message:    "One or more requested addresses are not usable by the data plane",
+		}
+	}
+	if !deploymentReady(dep) {
+		return ProgrammedResult{
+			Addresses:  bound,
+			Programmed: false,
+			Reason:     gwapiv1.GatewayReasonNoResources,
+			Message:    "Data plane has no ready replicas",
+		}
+	}
+	return ProgrammedResult{
+		Addresses:  bound,
+		Programmed: true,
+		Reason:     gwapiv1.GatewayReasonProgrammed,
+		Message:    "Data plane provisioned with the requested static addresses",
+	}
+}
+
+// realizedSet is the set of address values the Service has actually bound. For
+// a LoadBalancer this is the assigned ingress (the cloud grants usable
+// addresses and rejects unusable ones); for ClusterIP/NodePort it is the
+// external, cluster and node addresses.
+func realizedSet(svc *corev1.Service, nodeAddrs []string) map[string]bool {
+	out := map[string]bool{}
+	switch svc.Spec.Type {
+	case corev1.ServiceTypeLoadBalancer:
+		for _, ing := range svc.Status.LoadBalancer.Ingress {
+			if ing.IP != "" {
+				out[ing.IP] = true
+			}
+			if ing.Hostname != "" {
+				out[ing.Hostname] = true
+			}
+		}
+	default:
+		for _, ip := range svc.Spec.ExternalIPs {
+			out[ip] = true
+		}
+		for _, a := range fromClusterIPs(svc) {
+			out[a.Value] = true
+		}
+		if svc.Spec.Type == corev1.ServiceTypeNodePort {
+			for _, n := range nodeAddrs {
+				out[n] = true
+			}
+		}
+	}
+	return out
+}
+
+func fromService(svc *corev1.Service, nodeAddrs []string) []gwapiv1.GatewayStatusAddress {
 	switch svc.Spec.Type {
 	case corev1.ServiceTypeLoadBalancer:
 		var out []gwapiv1.GatewayStatusAddress
@@ -91,26 +189,17 @@ func fromService(svc *corev1.Service) []gwapiv1.GatewayStatusAddress {
 			}
 		}
 		return out
-	case corev1.ServiceTypeClusterIP, corev1.ServiceTypeNodePort:
+	case corev1.ServiceTypeNodePort:
+		var out []gwapiv1.GatewayStatusAddress
+		for _, n := range nodeAddrs {
+			out = append(out, addr(gwapiv1.IPAddressType, n))
+		}
+		return out
+	case corev1.ServiceTypeClusterIP:
 		return fromClusterIPs(svc)
 	default:
 		return nil
 	}
-}
-
-func fromStaticService(svc *corev1.Service, specAddrs []gwapiv1.GatewaySpecAddress) []gwapiv1.GatewayStatusAddress {
-	var out []gwapiv1.GatewayStatusAddress
-	for _, ip := range svc.Spec.ExternalIPs {
-		out = append(out, addr(gwapiv1.IPAddressType, ip))
-	}
-	if len(out) == 0 {
-		out = fromClusterIPs(svc)
-	}
-	if len(out) == 0 {
-		// Nothing bound yet: echo the requested addresses.
-		out = fromSpec(specAddrs)
-	}
-	return out
 }
 
 func fromClusterIPs(svc *corev1.Service) []gwapiv1.GatewayStatusAddress {
