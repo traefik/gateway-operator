@@ -41,7 +41,6 @@ rules:
   - gateway.networking.k8s.io
   resources:
   - gatewayclasses
-  - gateways
   verbs:
   - get
   - list
@@ -53,6 +52,22 @@ rules:
   - gateways/status
   verbs:
   - patch
+  - update
+- apiGroups:
+  - gateway.networking.k8s.io
+  resources:
+  - gateways
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - gateway.networking.k8s.io
+  resources:
+  - gateways/finalizers
+  verbs:
   - update
 - apiGroups:
   - gateway.traefik.io

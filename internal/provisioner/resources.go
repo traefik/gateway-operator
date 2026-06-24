@@ -22,18 +22,18 @@ type ResourceSet struct {
 }
 
 // Render builds the desired data plane resource set for a Gateway, applying the
-// resolved TraefikProxy configuration. Resources are rendered in the Gateway
-// namespace (gateway-namespace mode). Owner references are set by the caller.
-func Render(gw *gwapiv1.Gateway, proxy *v1alpha1.TraefikProxy) *ResourceSet {
+// resolved TraefikProxy configuration. Resources are rendered in namespace.
+// Owner references are set by the caller.
+func Render(gw *gwapiv1.Gateway, proxy *v1alpha1.TraefikProxy, namespace string) *ResourceSet {
 	name := ResourceName(gw)
 	ports := listenerPorts(gw)
 
 	sa := &corev1.ServiceAccount{
-		ObjectMeta: objectMeta(gw, name),
+		ObjectMeta: objectMeta(gw, name, namespace),
 	}
 
 	dep := &appsv1.Deployment{
-		ObjectMeta: objectMeta(gw, name),
+		ObjectMeta: objectMeta(gw, name, namespace),
 		Spec: appsv1.DeploymentSpec{
 			Replicas: replicas(proxy),
 			Selector: &metav1.LabelSelector{MatchLabels: selectorLabels(gw)},
@@ -57,7 +57,7 @@ func Render(gw *gwapiv1.Gateway, proxy *v1alpha1.TraefikProxy) *ResourceSet {
 	}
 
 	svc := &corev1.Service{
-		ObjectMeta: serviceObjectMeta(gw, name, proxy),
+		ObjectMeta: serviceObjectMeta(gw, name, namespace, proxy),
 		Spec: corev1.ServiceSpec{
 			Type:              serviceType(proxy),
 			Selector:          selectorLabels(gw),
@@ -93,17 +93,17 @@ func applyStaticAddresses(svc *corev1.Service, gw *gwapiv1.Gateway) {
 	}
 }
 
-func objectMeta(gw *gwapiv1.Gateway, name string) metav1.ObjectMeta {
+func objectMeta(gw *gwapiv1.Gateway, name, namespace string) metav1.ObjectMeta {
 	return metav1.ObjectMeta{
 		Name:        name,
-		Namespace:   gw.Namespace,
+		Namespace:   namespace,
 		Labels:      commonLabels(gw),
 		Annotations: infraAnnotations(gw),
 	}
 }
 
-func serviceObjectMeta(gw *gwapiv1.Gateway, name string, proxy *v1alpha1.TraefikProxy) metav1.ObjectMeta {
-	m := objectMeta(gw, name)
+func serviceObjectMeta(gw *gwapiv1.Gateway, name, namespace string, proxy *v1alpha1.TraefikProxy) metav1.ObjectMeta {
+	m := objectMeta(gw, name, namespace)
 	if proxy != nil && proxy.Spec.Service != nil {
 		m.Annotations = mergeMaps(m.Annotations, proxy.Spec.Service.Annotations)
 	}
@@ -113,10 +113,7 @@ func serviceObjectMeta(gw *gwapiv1.Gateway, name string, proxy *v1alpha1.Traefik
 // commonLabels carries the operator markers plus the propagated
 // spec.infrastructure.labels (GatewayInfrastructurePropagation).
 func commonLabels(gw *gwapiv1.Gateway) map[string]string {
-	l := map[string]string{
-		GatewayNameLabel: gw.Name,
-		ManagedByLabel:   ManagedByValue,
-	}
+	l := SelectorLabels(gw)
 	if gw.Spec.Infrastructure != nil {
 		for k, v := range gw.Spec.Infrastructure.Labels {
 			l[string(k)] = string(v)
@@ -125,13 +122,20 @@ func commonLabels(gw *gwapiv1.Gateway) map[string]string {
 	return l
 }
 
-// selectorLabels identify the pods of a Gateway data plane. They must be stable
-// and must not include propagated infrastructure labels (those can change).
-func selectorLabels(gw *gwapiv1.Gateway) map[string]string {
+// SelectorLabels identify the data plane resources of a Gateway. They are
+// stable and must not include propagated infrastructure labels (those can
+// change). The namespace label keeps them unambiguous when several Gateways
+// share one namespace in Dedicated mode.
+func SelectorLabels(gw *gwapiv1.Gateway) map[string]string {
 	return map[string]string{
-		GatewayNameLabel: gw.Name,
-		ManagedByLabel:   ManagedByValue,
+		GatewayNameLabel:      gw.Name,
+		GatewayNamespaceLabel: gw.Namespace,
+		ManagedByLabel:        ManagedByValue,
 	}
+}
+
+func selectorLabels(gw *gwapiv1.Gateway) map[string]string {
+	return SelectorLabels(gw)
 }
 
 // infraAnnotations carries the propagated spec.infrastructure.annotations.

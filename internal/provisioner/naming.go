@@ -18,6 +18,11 @@ const (
 	// GatewayNameLabel is required by the GatewayInfrastructure conformance test.
 	GatewayNameLabel = "gateway.networking.k8s.io/gateway-name"
 
+	// GatewayNamespaceLabel disambiguates data planes of Gateways that share a
+	// name across namespaces, which happens in Dedicated mode where every data
+	// plane lives in one namespace.
+	GatewayNamespaceLabel = "gateway.traefik.io/gateway-namespace"
+
 	// ManagedByLabel marks resources owned by the operator.
 	ManagedByLabel = "app.kubernetes.io/managed-by"
 

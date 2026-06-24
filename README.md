@@ -3,13 +3,15 @@
 Kubernetes operator that provisions and manages Traefik data planes per Gateway
 API `Gateway`, mirroring the Envoy Gateway model.
 
-Status: Phases 0 and 1 implemented (see [docs/DESIGN.md](docs/DESIGN.md)
-section 11). The operator provisions a data plane per Gateway in the Gateway
-namespace, propagates `spec.infrastructure` metadata, honors `spec.addresses`
-static addresses (rejecting unsupported address types, gating `Programmed` on
-the address actually being realized), supports LoadBalancer, ClusterIP and
-NodePort Service types, and derives Gateway status from the resources it
-created. Dedicated namespace mode and merged Gateways are not implemented yet.
+Status: Phases 0 to 2 implemented (see [docs/DESIGN.md](docs/DESIGN.md)
+section 11). The operator provisions a data plane per Gateway, propagates
+`spec.infrastructure` metadata, honors `spec.addresses` static addresses
+(rejecting unsupported address types, gating `Programmed` on the address
+actually being realized), supports LoadBalancer, ClusterIP and NodePort Service
+types, derives Gateway status from the resources it created, and supports both
+deployment modes: Gateway-namespace (owner-reference garbage collection) and
+Dedicated namespace (finalizer based cleanup). Merged Gateways are not
+implemented yet.
 
 ## Why
 

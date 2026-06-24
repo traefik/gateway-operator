@@ -17,10 +17,41 @@ type TraefikProxySpec struct {
 	// +optional
 	Service *ServiceConfig `json:"service,omitempty"`
 
+	// Provisioning controls where and how the data plane is deployed.
+	// +optional
+	Provisioning *ProvisioningConfig `json:"provisioning,omitempty"`
+
 	// MergeGateways makes all Gateways of the owning GatewayClass share a
 	// single data plane. Not implemented before phase 3.
 	// +optional
 	MergeGateways bool `json:"mergeGateways,omitempty"`
+}
+
+// DeploymentMode selects where the data plane resource set is created.
+// +kubebuilder:validation:Enum=GatewayNamespace;Dedicated
+type DeploymentMode string
+
+const (
+	// GatewayNamespaceMode provisions the data plane in the Gateway's own
+	// namespace, with the Gateway as owner for garbage collection.
+	GatewayNamespaceMode DeploymentMode = "GatewayNamespace"
+
+	// DedicatedMode provisions the data plane in a single shared namespace.
+	// Cross-namespace ownership is not expressible, so the operator uses a
+	// finalizer on the Gateway and deletes the resources explicitly.
+	DedicatedMode DeploymentMode = "Dedicated"
+)
+
+// ProvisioningConfig controls the data plane deployment topology.
+type ProvisioningConfig struct {
+	// Mode selects the deployment topology. Defaults to GatewayNamespace.
+	// +optional
+	Mode DeploymentMode `json:"mode,omitempty"`
+
+	// Namespace is the target namespace for the data plane when Mode is
+	// Dedicated. When empty, the operator default namespace is used.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // DeploymentConfig configures the provisioned data plane Deployment.

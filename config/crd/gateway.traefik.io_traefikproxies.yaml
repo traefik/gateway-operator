@@ -130,6 +130,23 @@ spec:
                   MergeGateways makes all Gateways of the owning GatewayClass share a
                   single data plane. Not implemented before phase 3.
                 type: boolean
+              provisioning:
+                description: Provisioning controls where and how the data plane is
+                  deployed.
+                properties:
+                  mode:
+                    description: Mode selects the deployment topology. Defaults to
+                      GatewayNamespace.
+                    enum:
+                    - GatewayNamespace
+                    - Dedicated
+                    type: string
+                  namespace:
+                    description: |-
+                      Namespace is the target namespace for the data plane when Mode is
+                      Dedicated. When empty, the operator default namespace is used.
+                    type: string
+                type: object
               service:
                 description: Service configures the data plane Service.
                 properties:

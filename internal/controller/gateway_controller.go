@@ -20,13 +20,29 @@ import (
 	"github.com/traefik/traefik-operator/internal/status"
 )
 
+const (
+	// dataPlaneFinalizer guards Dedicated-mode data planes, whose resources
+	// live in another namespace and so cannot be garbage collected through
+	// owner references.
+	dataPlaneFinalizer = "gateway.traefik.io/data-plane"
+
+	// provisionedNamespaceAnnotation records where the data plane was
+	// provisioned, so cleanup is reliable even if the TraefikProxy is gone.
+	provisionedNamespaceAnnotation = "gateway.traefik.io/provisioned-namespace"
+)
+
 // GatewayReconciler provisions a data plane per Gateway and owns its status.
 type GatewayReconciler struct {
 	client.Client
+
+	// DataPlaneNamespace is the default namespace for Dedicated-mode data
+	// planes when the TraefikProxy does not set one.
+	DataPlaneNamespace string
 }
 
-// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways/status,verbs=update;patch
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways/finalizers,verbs=update
 // +kubebuilder:rbac:groups=gateway.traefik.io,resources=traefikproxies,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
@@ -44,6 +60,27 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 	if !owned {
+		// A Gateway we no longer manage (class changed) may still carry our
+		// finalizer and orphaned Dedicated-mode resources. Clean up.
+		if controllerutil.ContainsFinalizer(&gw, dataPlaneFinalizer) {
+			return ctrl.Result{}, r.finalize(ctx, &gw)
+		}
+		return ctrl.Result{}, nil
+	}
+
+	proxy, err := r.resolveProxy(ctx, &gw)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	target := provisioner.Resolve(&gw, proxy, r.DataPlaneNamespace)
+
+	// Handle deletion: tear down Dedicated-mode resources, then release the
+	// finalizer. Gateway-namespace resources are garbage collected by owner
+	// references and need no finalizer.
+	if !gw.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(&gw, dataPlaneFinalizer) {
+			return ctrl.Result{}, r.finalize(ctx, &gw)
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -57,17 +94,20 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	proxy, err := r.resolveProxy(ctx, &gw)
-	if err != nil {
+	// Maintain the finalizer and provisioned-namespace marker for Dedicated
+	// mode; remove them when running in Gateway-namespace mode.
+	if changed := r.reconcileFinalizer(&gw, target); changed {
+		if err := r.Update(ctx, &gw); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	set := provisioner.Render(&gw, proxy, target.Namespace)
+	if err := r.applySet(ctx, &gw, set, target); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	set := provisioner.Render(&gw, proxy)
-	if err := r.applySet(ctx, &gw, set); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	svc, dep, err := r.observe(ctx, &gw, set)
+	svc, dep, err := r.observe(ctx, set, target.Namespace)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -82,6 +122,62 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+// reconcileFinalizer adds the finalizer and provisioned-namespace annotation in
+// Dedicated mode, and removes them otherwise. It reports whether the Gateway
+// metadata changed and needs an update.
+func (r *GatewayReconciler) reconcileFinalizer(gw *gwapiv1.Gateway, target provisioner.Target) bool {
+	if !target.Dedicated() {
+		removed := controllerutil.RemoveFinalizer(gw, dataPlaneFinalizer)
+		if gw.Annotations[provisionedNamespaceAnnotation] != "" {
+			delete(gw.Annotations, provisionedNamespaceAnnotation)
+			removed = true
+		}
+		return removed
+	}
+
+	changed := controllerutil.AddFinalizer(gw, dataPlaneFinalizer)
+	if gw.Annotations[provisionedNamespaceAnnotation] != target.Namespace {
+		if gw.Annotations == nil {
+			gw.Annotations = map[string]string{}
+		}
+		gw.Annotations[provisionedNamespaceAnnotation] = target.Namespace
+		changed = true
+	}
+	return changed
+}
+
+// finalize deletes the Dedicated-mode data plane resources and removes the
+// finalizer.
+func (r *GatewayReconciler) finalize(ctx context.Context, gw *gwapiv1.Gateway) error {
+	namespace := gw.Annotations[provisionedNamespaceAnnotation]
+	if namespace == "" {
+		namespace = r.DataPlaneNamespace
+	}
+	if err := r.cleanup(ctx, gw, namespace); err != nil {
+		return err
+	}
+	controllerutil.RemoveFinalizer(gw, dataPlaneFinalizer)
+	delete(gw.Annotations, provisionedNamespaceAnnotation)
+	return r.Update(ctx, gw)
+}
+
+// cleanup deletes the data plane resources provisioned for a Gateway in the
+// given namespace. The resource set is a single named object of each kind.
+func (r *GatewayReconciler) cleanup(ctx context.Context, gw *gwapiv1.Gateway, namespace string) error {
+	name := provisioner.ResourceName(gw)
+	om := metav1.ObjectMeta{Name: name, Namespace: namespace}
+	for _, obj := range []client.Object{
+		&appsv1.Deployment{ObjectMeta: om},
+		&corev1.Service{ObjectMeta: om},
+		&corev1.ServiceAccount{ObjectMeta: om},
+	} {
+		if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 // ownsGateway reports whether the Gateway references a GatewayClass handled by
@@ -113,13 +209,17 @@ func (r *GatewayReconciler) resolveProxy(ctx context.Context, gw *gwapiv1.Gatewa
 	return &proxy, nil
 }
 
-func (r *GatewayReconciler) applySet(ctx context.Context, gw *gwapiv1.Gateway, set *provisioner.ResourceSet) error {
-	if err := r.apply(ctx, gw, set.ServiceAccount, func() {}); err != nil {
+func (r *GatewayReconciler) applySet(ctx context.Context, gw *gwapiv1.Gateway, set *provisioner.ResourceSet, target provisioner.Target) error {
+	// Owner references only work within the Gateway namespace. In Dedicated
+	// mode the data plane lives elsewhere and is reclaimed by the finalizer.
+	owner := !target.Dedicated()
+
+	if err := r.apply(ctx, gw, set.ServiceAccount, owner, func() {}); err != nil {
 		return fmt.Errorf("serviceaccount: %w", err)
 	}
 
 	desiredDep := set.Deployment.DeepCopy()
-	if err := r.apply(ctx, gw, set.Deployment, func() {
+	if err := r.apply(ctx, gw, set.Deployment, owner, func() {
 		set.Deployment.Spec = desiredDep.Spec
 		set.Deployment.Labels = desiredDep.Labels
 		set.Deployment.Annotations = desiredDep.Annotations
@@ -128,7 +228,7 @@ func (r *GatewayReconciler) applySet(ctx context.Context, gw *gwapiv1.Gateway, s
 	}
 
 	desiredSvc := set.Service.DeepCopy()
-	if err := r.apply(ctx, gw, set.Service, func() {
+	if err := r.apply(ctx, gw, set.Service, owner, func() {
 		// Preserve API-server assigned fields (ClusterIP is immutable).
 		set.Service.Spec.Type = desiredSvc.Spec.Type
 		set.Service.Spec.Selector = desiredSvc.Spec.Selector
@@ -144,23 +244,24 @@ func (r *GatewayReconciler) applySet(ctx context.Context, gw *gwapiv1.Gateway, s
 	return nil
 }
 
-// apply creates or updates obj, setting the Gateway as controller owner so
-// Kubernetes garbage collects the resource set on Gateway deletion
-// (gateway-namespace mode).
-func (r *GatewayReconciler) apply(ctx context.Context, gw *gwapiv1.Gateway, obj client.Object, mutate func()) error {
+// apply creates or updates obj. When owner is true the Gateway is set as
+// controller owner so Kubernetes garbage collects the resource on Gateway
+// deletion (Gateway-namespace mode).
+func (r *GatewayReconciler) apply(ctx context.Context, gw *gwapiv1.Gateway, obj client.Object, owner bool, mutate func()) error {
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, obj, func() error {
 		mutate()
-		return controllerutil.SetControllerReference(gw, obj, r.Scheme())
+		if owner {
+			return controllerutil.SetControllerReference(gw, obj, r.Scheme())
+		}
+		return nil
 	})
 	return err
 }
 
-func (r *GatewayReconciler) observe(ctx context.Context, gw *gwapiv1.Gateway, set *provisioner.ResourceSet) (*corev1.Service, *appsv1.Deployment, error) {
-	name := types.NamespacedName{Namespace: gw.Namespace, Name: set.Service.Name}
-
+func (r *GatewayReconciler) observe(ctx context.Context, set *provisioner.ResourceSet, namespace string) (*corev1.Service, *appsv1.Deployment, error) {
 	var svc corev1.Service
 	svcPtr := &svc
-	if err := r.Get(ctx, name, &svc); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: set.Service.Name}, &svc); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return nil, nil, err
 		}
@@ -169,7 +270,7 @@ func (r *GatewayReconciler) observe(ctx context.Context, gw *gwapiv1.Gateway, se
 
 	var dep appsv1.Deployment
 	depPtr := &dep
-	if err := r.Get(ctx, types.NamespacedName{Namespace: gw.Namespace, Name: set.Deployment.Name}, &dep); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: set.Deployment.Name}, &dep); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return nil, nil, err
 		}
