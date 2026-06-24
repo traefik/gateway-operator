@@ -62,12 +62,14 @@ kubectl apply -f config/samples/gatewayclass.yaml
 ## Data plane flags
 
 The provisioned Traefik instances run the existing in tree Gateway provider,
-scoped to their own Gateway. Two Traefik flags are required and proposed
-upstream (see DESIGN.md section 8): a per Gateway scoping flag and a flag to
-disable Gateway status writes so the operator is the single status writer.
-Until those flags exist in Traefik, the rendered data plane Deployment will not
-reconcile correctly; the control plane provisioning and status logic are
-complete and testable independently.
+scoped to their own Gateway. Two provider options make this work, both
+implemented in the in-tree provider (see DESIGN.md section 8):
+
+- `--providers.kubernetesGateway.gateway=<namespace>/<name>`: scope the data
+  plane to the single Gateway it was provisioned for.
+- `--providers.kubernetesGateway.disableGatewayStatus=true`: stop the data
+  plane from writing Gateway and GatewayClass status, so the operator is the
+  single status writer. Route status is still written by the data plane.
 
 ## Design
 

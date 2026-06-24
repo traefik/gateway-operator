@@ -254,16 +254,18 @@ write Gateway status (single writer)
 
 The provisioned Traefik instances run the existing
 `pkg/provider/kubernetes/gateway` provider to translate routes attached to their
-Gateway into dynamic configuration. Two changes are needed on the Traefik side:
+Gateway into dynamic configuration. Two provider options make this work, both
+implemented in the in-tree provider:
 
-1. A scoping flag so a data plane instance only reconciles the Gateway(s) it was
-   provisioned for, instead of all Gateways in the cluster. Candidate:
-   `--providers.kubernetesGateway.gateway=<namespace>/<name>` or a label
-   selector. Without this, every provisioned instance would try to serve every
-   Gateway.
-2. A flag to disable Gateway and GatewayClass status writes in the data plane,
-   so the operator is the single status writer:
-   `--providers.kubernetesGateway.statusManagement=false`.
+1. `--providers.kubernetesGateway.gateway=<namespace>/<name>` scopes a data
+   plane instance to the single Gateway it was provisioned for, instead of all
+   Gateways in the cluster. Without this, every provisioned instance would try
+   to serve every Gateway. A label selector or a comma list of references can be
+   added later for merged Gateways.
+2. `--providers.kubernetesGateway.disableGatewayStatus=true` stops the data
+   plane from writing Gateway and GatewayClass status, so the operator is the
+   single status writer. Route status is still written by the data plane, which
+   is the component that actually routes.
 
 The operator does not duplicate routing logic. This keeps the routing
 conformance surface (the bulk of the features) in one place.

@@ -148,13 +148,13 @@ func infraAnnotations(gw *gwapiv1.Gateway) map[string]string {
 
 // containerArgs builds the data plane Traefik arguments. The kubernetesGateway
 // provider is scoped to the single Gateway and told not to write Gateway status
-// (the operator is the single writer). Both scoping flags are proposed Traefik
-// additions, see DESIGN.md section 8.
+// (the operator is the single writer). Both flags are provided by the in-tree
+// provider, see DESIGN.md section 8.
 func containerArgs(gw *gwapiv1.Gateway, ports []int32) []string {
 	args := []string{
 		"--providers.kubernetesGateway=true",
 		fmt.Sprintf("--providers.kubernetesGateway.gateway=%s/%s", gw.Namespace, gw.Name),
-		"--providers.kubernetesGateway.statusManagement=false",
+		"--providers.kubernetesGateway.disableGatewayStatus=true",
 	}
 	for _, p := range ports {
 		args = append(args, fmt.Sprintf("--entryPoints.%s.address=:%d", entryPointName(p), p))
