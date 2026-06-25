@@ -6,7 +6,9 @@ import (
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
@@ -15,11 +17,17 @@ import (
 	"github.com/traefik/traefik-operator/api/v1alpha1"
 )
 
+// metricsPort is the container port exposing Prometheus metrics.
+const metricsPort int32 = 9100
+
 // ResourceSet is the data plane resource set provisioned for one Gateway.
+// PodDisruptionBudget and HorizontalPodAutoscaler are nil unless configured.
 type ResourceSet struct {
-	ServiceAccount *corev1.ServiceAccount
-	Deployment     *appsv1.Deployment
-	Service        *corev1.Service
+	ServiceAccount      *corev1.ServiceAccount
+	Deployment          *appsv1.Deployment
+	Service             *corev1.Service
+	PodDisruptionBudget *policyv1.PodDisruptionBudget
+	HPA                 *autoscalingv2.HorizontalPodAutoscaler
 }
 
 // buildParams describes a data plane resource set to render. It is shared by
@@ -88,7 +96,7 @@ func build(p buildParams) *ResourceSet {
 	dep := &appsv1.Deployment{
 		ObjectMeta: om,
 		Spec: appsv1.DeploymentSpec{
-			Replicas: replicas(p.proxy),
+			Replicas: deploymentReplicas(p.proxy),
 			Selector: &metav1.LabelSelector{MatchLabels: p.selector},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
@@ -100,8 +108,8 @@ func build(p buildParams) *ResourceSet {
 					Containers: []corev1.Container{{
 						Name:      "traefik",
 						Image:     image(p.proxy),
-						Args:      containerArgs(p.refs, p.ports),
-						Ports:     containerPorts(p.ports),
+						Args:      containerArgs(p.refs, p.ports, p.proxy),
+						Ports:     containerPorts(p.ports, p.proxy),
 						Resources: resources(p.proxy),
 					}},
 				},
@@ -119,7 +127,69 @@ func build(p buildParams) *ResourceSet {
 		},
 	}
 
-	return &ResourceSet{ServiceAccount: sa, Deployment: dep, Service: svc}
+	return &ResourceSet{
+		ServiceAccount:      sa,
+		Deployment:          dep,
+		Service:             svc,
+		PodDisruptionBudget: buildPDB(p, om),
+		HPA:                 buildHPA(p, om),
+	}
+}
+
+// deploymentReplicas returns the desired replica count, or nil when an
+// autoscaler manages it.
+func deploymentReplicas(proxy *v1alpha1.TraefikProxy) *int32 {
+	if proxy != nil && proxy.Spec.Autoscaling != nil {
+		return nil
+	}
+	return replicas(proxy)
+}
+
+func buildPDB(p buildParams, om metav1.ObjectMeta) *policyv1.PodDisruptionBudget {
+	if p.proxy == nil || p.proxy.Spec.PodDisruptionBudget == nil {
+		return nil
+	}
+	cfg := p.proxy.Spec.PodDisruptionBudget
+	return &policyv1.PodDisruptionBudget{
+		ObjectMeta: om,
+		Spec: policyv1.PodDisruptionBudgetSpec{
+			MinAvailable:   cfg.MinAvailable,
+			MaxUnavailable: cfg.MaxUnavailable,
+			Selector:       &metav1.LabelSelector{MatchLabels: p.selector},
+		},
+	}
+}
+
+func buildHPA(p buildParams, om metav1.ObjectMeta) *autoscalingv2.HorizontalPodAutoscaler {
+	if p.proxy == nil || p.proxy.Spec.Autoscaling == nil {
+		return nil
+	}
+	cfg := p.proxy.Spec.Autoscaling
+	hpa := &autoscalingv2.HorizontalPodAutoscaler{
+		ObjectMeta: om,
+		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
+			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
+				APIVersion: "apps/v1",
+				Kind:       "Deployment",
+				Name:       p.name,
+			},
+			MinReplicas: cfg.MinReplicas,
+			MaxReplicas: cfg.MaxReplicas,
+		},
+	}
+	if cfg.TargetCPUUtilizationPercentage != nil {
+		hpa.Spec.Metrics = []autoscalingv2.MetricSpec{{
+			Type: autoscalingv2.ResourceMetricSourceType,
+			Resource: &autoscalingv2.ResourceMetricSource{
+				Name: corev1.ResourceCPU,
+				Target: autoscalingv2.MetricTarget{
+					Type:               autoscalingv2.UtilizationMetricType,
+					AverageUtilization: cfg.TargetCPUUtilizationPercentage,
+				},
+			},
+		}}
+	}
+	return hpa
 }
 
 func mergedPorts(gateways []*gwapiv1.Gateway) []int32 {
@@ -209,8 +279,9 @@ func infraAnnotations(gw *gwapiv1.Gateway) map[string]string {
 // containerArgs builds the data plane Traefik arguments. The kubernetesGateway
 // provider is scoped to the given Gateway references and told not to write
 // Gateway status (the operator is the single writer). Both flags are provided
-// by the in-tree provider, see DESIGN.md section 8.
-func containerArgs(refs []string, ports []int32) []string {
+// by the in-tree provider, see DESIGN.md section 8. Logging, metrics and
+// tracing are appended from the TraefikProxy configuration.
+func containerArgs(refs []string, ports []int32, proxy *v1alpha1.TraefikProxy) []string {
 	args := []string{
 		"--providers.kubernetesGateway=true",
 		fmt.Sprintf("--providers.kubernetesGateway.gateway=%s", strings.Join(refs, ",")),
@@ -219,7 +290,32 @@ func containerArgs(refs []string, ports []int32) []string {
 	for _, p := range ports {
 		args = append(args, fmt.Sprintf("--entryPoints.%s.address=:%d", entryPointName(p), p))
 	}
+
+	if proxy == nil {
+		return args
+	}
+
+	if proxy.Spec.Logs != nil && proxy.Spec.Logs.Level != "" {
+		args = append(args, fmt.Sprintf("--log.level=%s", proxy.Spec.Logs.Level))
+	}
+	if metricsEnabled(proxy) {
+		args = append(args,
+			fmt.Sprintf("--entryPoints.metrics.address=:%d", metricsPort),
+			"--metrics.prometheus=true",
+			"--metrics.prometheus.entryPoint=metrics",
+		)
+	}
+	if proxy.Spec.Tracing != nil && proxy.Spec.Tracing.OTLPEndpoint != "" {
+		args = append(args,
+			"--tracing.otlp=true",
+			fmt.Sprintf("--tracing.otlp.http.endpoint=%s", proxy.Spec.Tracing.OTLPEndpoint),
+		)
+	}
 	return args
+}
+
+func metricsEnabled(proxy *v1alpha1.TraefikProxy) bool {
+	return proxy != nil && proxy.Spec.Metrics != nil && proxy.Spec.Metrics.Prometheus
 }
 
 func listenerPorts(gw *gwapiv1.Gateway) []int32 {
@@ -237,12 +333,19 @@ func listenerPorts(gw *gwapiv1.Gateway) []int32 {
 	return ports
 }
 
-func containerPorts(ports []int32) []corev1.ContainerPort {
+func containerPorts(ports []int32, proxy *v1alpha1.TraefikProxy) []corev1.ContainerPort {
 	cp := make([]corev1.ContainerPort, 0, len(ports))
 	for _, p := range ports {
 		cp = append(cp, corev1.ContainerPort{
 			Name:          entryPointName(p),
 			ContainerPort: p,
+			Protocol:      corev1.ProtocolTCP,
+		})
+	}
+	if metricsEnabled(proxy) {
+		cp = append(cp, corev1.ContainerPort{
+			Name:          "metrics",
+			ContainerPort: metricsPort,
 			Protocol:      corev1.ProtocolTCP,
 		})
 	}

@@ -45,6 +45,30 @@ spec:
               It is referenced from GatewayClass.spec.parametersRef, mirroring the
               EnvoyProxy model of Envoy Gateway.
             properties:
+              autoscaling:
+                description: |-
+                  Autoscaling configures a HorizontalPodAutoscaler for the data plane. When
+                  set, the operator does not manage the Deployment replica count.
+                properties:
+                  maxReplicas:
+                    description: MaxReplicas is the upper bound for the number of
+                      replicas.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  minReplicas:
+                    description: MinReplicas is the lower bound for the number of
+                      replicas.
+                    format: int32
+                    type: integer
+                  targetCPUUtilizationPercentage:
+                    description: TargetCPUUtilizationPercentage is the average CPU
+                      target across pods.
+                    format: int32
+                    type: integer
+                required:
+                - maxReplicas
+                type: object
               deployment:
                 description: Deployment configures the data plane Deployment.
                 properties:
@@ -125,11 +149,45 @@ spec:
                         type: object
                     type: object
                 type: object
+              logs:
+                description: Logs configures the data plane logging.
+                properties:
+                  level:
+                    description: Level is the log level (DEBUG, INFO, WARN, ERROR).
+                    type: string
+                type: object
               mergeGateways:
                 description: |-
                   MergeGateways makes all Gateways of the owning GatewayClass share a
-                  single data plane. Not implemented before phase 3.
+                  single data plane.
                 type: boolean
+              metrics:
+                description: Metrics configures the data plane metrics.
+                properties:
+                  prometheus:
+                    description: |-
+                      Prometheus enables the Prometheus metrics endpoint on a dedicated
+                      "metrics" entry point.
+                    type: boolean
+                type: object
+              podDisruptionBudget:
+                description: PodDisruptionBudget configures a PodDisruptionBudget
+                  for the data plane.
+                properties:
+                  maxUnavailable:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: MaxUnavailable is the maximum number of unavailable
+                      pods.
+                    x-kubernetes-int-or-string: true
+                  minAvailable:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: MinAvailable is the minimum number of available pods.
+                    x-kubernetes-int-or-string: true
+                type: object
               provisioning:
                 description: Provisioning controls where and how the data plane is
                   deployed.
@@ -167,6 +225,14 @@ spec:
                     - LoadBalancer
                     - ClusterIP
                     - NodePort
+                    type: string
+                type: object
+              tracing:
+                description: Tracing configures the data plane tracing.
+                properties:
+                  otlpEndpoint:
+                    description: OTLPEndpoint enables OTLP tracing to the given HTTP
+                      endpoint.
                     type: string
                 type: object
             type: object

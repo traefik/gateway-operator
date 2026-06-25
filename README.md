@@ -10,11 +10,12 @@ section 11). The operator provisions a data plane per Gateway, propagates
 actually being realized), supports LoadBalancer, ClusterIP and NodePort Service
 types, derives Gateway status from the resources it created, supports the
 Gateway-namespace (owner-reference garbage collection) and Dedicated namespace
-(finalizer based cleanup) deployment modes, and supports merged Gateways: when
-`mergeGateways` is set, all Gateways of a GatewayClass share one data plane
-(union of listener ports, scoped to every member) with per-listener conflict
-detection. Autoscaling, PodDisruptionBudget and telemetry passthrough (phase 4)
-are not implemented yet.
+(finalizer based cleanup) deployment modes, supports merged Gateways (when
+`mergeGateways` is set, all Gateways of a GatewayClass share one data plane,
+union of listener ports, scoped to every member, with per-listener conflict
+detection), and renders optional HorizontalPodAutoscaler, PodDisruptionBudget,
+log level, Prometheus metrics and OTLP tracing from the TraefikProxy
+configuration. All five design phases (0 to 4) are implemented.
 
 ## Why
 

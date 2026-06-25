@@ -5,12 +5,16 @@ import (
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -263,5 +267,63 @@ func TestReconcile_MergedGateways(t *testing.T) {
 
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "traefik-system", Name: shared}, &appsv1.Deployment{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("expected shared deployment torn down, got %v", err)
+	}
+}
+
+func TestReconcile_AutoscalingAndPDBLifecycle(t *testing.T) {
+	s := testScheme(t)
+	ref := &gwapiv1.ParametersReference{
+		Group: gwapiv1.Group(v1alpha1.GroupVersion.Group),
+		Kind:  "TraefikProxy",
+		Name:  "dp",
+	}
+	gc := gatewayClass("traefik", ref)
+	proxy := &v1alpha1.TraefikProxy{
+		ObjectMeta: metav1.ObjectMeta{Name: "dp"},
+		Spec: v1alpha1.TraefikProxySpec{
+			Autoscaling:         &v1alpha1.AutoscalingConfig{MaxReplicas: 4},
+			PodDisruptionBudget: &v1alpha1.PodDisruptionBudgetConfig{MinAvailable: ptr.To(intstr.FromInt32(1))},
+		},
+	}
+	gw := testGateway("app", "gw", "traefik")
+
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(gc, proxy, gw).
+		WithStatusSubresource(&gwapiv1.Gateway{}).
+		Build()
+
+	r := &GatewayReconciler{Client: cl, DataPlaneNamespace: "traefik-system"}
+	reconcile(t, r, gw)
+
+	ctx := context.Background()
+	name := provisioner.ResourceName(gw)
+
+	// HPA and PDB are provisioned alongside the data plane.
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app", Name: name}, &autoscalingv2.HorizontalPodAutoscaler{}); err != nil {
+		t.Fatalf("expected HPA: %v", err)
+	}
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app", Name: name}, &policyv1.PodDisruptionBudget{}); err != nil {
+		t.Fatalf("expected PDB: %v", err)
+	}
+
+	// Disable both on the TraefikProxy and reconcile again.
+	var p v1alpha1.TraefikProxy
+	if err := cl.Get(ctx, types.NamespacedName{Name: "dp"}, &p); err != nil {
+		t.Fatal(err)
+	}
+	p.Spec.Autoscaling = nil
+	p.Spec.PodDisruptionBudget = nil
+	if err := cl.Update(ctx, &p); err != nil {
+		t.Fatal(err)
+	}
+	reconcile(t, r, gw)
+
+	// Both are removed.
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app", Name: name}, &autoscalingv2.HorizontalPodAutoscaler{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected HPA removed, got %v", err)
+	}
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app", Name: name}, &policyv1.PodDisruptionBudget{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected PDB removed, got %v", err)
 	}
 }

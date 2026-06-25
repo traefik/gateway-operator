@@ -5,7 +5,9 @@ import (
 	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -47,6 +49,8 @@ type GatewayReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+// +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile provisions the data plane for a Gateway and writes its status.
 func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -182,6 +186,8 @@ func (r *GatewayReconciler) deleteSet(ctx context.Context, namespace, name strin
 		&appsv1.Deployment{ObjectMeta: om},
 		&corev1.Service{ObjectMeta: om},
 		&corev1.ServiceAccount{ObjectMeta: om},
+		&policyv1.PodDisruptionBudget{ObjectMeta: om},
+		&autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: om},
 	} {
 		if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
 			return err
@@ -250,6 +256,41 @@ func (r *GatewayReconciler) applySet(ctx context.Context, gw *gwapiv1.Gateway, s
 		set.Service.Annotations = desiredSvc.Annotations
 	}); err != nil {
 		return fmt.Errorf("service: %w", err)
+	}
+
+	om := metav1.ObjectMeta{Name: set.Service.Name, Namespace: set.Service.Namespace}
+
+	if set.PodDisruptionBudget != nil {
+		desired := set.PodDisruptionBudget.DeepCopy()
+		if err := r.apply(ctx, gw, set.PodDisruptionBudget, owner, func() {
+			set.PodDisruptionBudget.Spec = desired.Spec
+			set.PodDisruptionBudget.Labels = desired.Labels
+		}); err != nil {
+			return fmt.Errorf("poddisruptionbudget: %w", err)
+		}
+	} else if err := r.deleteIfExists(ctx, &policyv1.PodDisruptionBudget{ObjectMeta: om}); err != nil {
+		return fmt.Errorf("poddisruptionbudget: %w", err)
+	}
+
+	if set.HPA != nil {
+		desired := set.HPA.DeepCopy()
+		if err := r.apply(ctx, gw, set.HPA, owner, func() {
+			set.HPA.Spec = desired.Spec
+			set.HPA.Labels = desired.Labels
+		}); err != nil {
+			return fmt.Errorf("horizontalpodautoscaler: %w", err)
+		}
+	} else if err := r.deleteIfExists(ctx, &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: om}); err != nil {
+		return fmt.Errorf("horizontalpodautoscaler: %w", err)
+	}
+
+	return nil
+}
+
+// deleteIfExists deletes obj, ignoring a not-found result.
+func (r *GatewayReconciler) deleteIfExists(ctx context.Context, obj client.Object) error {
+	if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
+		return err
 	}
 	return nil
 }

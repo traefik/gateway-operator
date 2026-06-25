@@ -3,6 +3,7 @@ package v1alpha1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // TraefikProxySpec defines the data plane provisioned for a Gateway.
@@ -21,10 +22,79 @@ type TraefikProxySpec struct {
 	// +optional
 	Provisioning *ProvisioningConfig `json:"provisioning,omitempty"`
 
+	// Autoscaling configures a HorizontalPodAutoscaler for the data plane. When
+	// set, the operator does not manage the Deployment replica count.
+	// +optional
+	Autoscaling *AutoscalingConfig `json:"autoscaling,omitempty"`
+
+	// PodDisruptionBudget configures a PodDisruptionBudget for the data plane.
+	// +optional
+	PodDisruptionBudget *PodDisruptionBudgetConfig `json:"podDisruptionBudget,omitempty"`
+
+	// Logs configures the data plane logging.
+	// +optional
+	Logs *LogsConfig `json:"logs,omitempty"`
+
+	// Metrics configures the data plane metrics.
+	// +optional
+	Metrics *MetricsConfig `json:"metrics,omitempty"`
+
+	// Tracing configures the data plane tracing.
+	// +optional
+	Tracing *TracingConfig `json:"tracing,omitempty"`
+
 	// MergeGateways makes all Gateways of the owning GatewayClass share a
-	// single data plane. Not implemented before phase 3.
+	// single data plane.
 	// +optional
 	MergeGateways bool `json:"mergeGateways,omitempty"`
+}
+
+// AutoscalingConfig configures a HorizontalPodAutoscaler for the data plane.
+type AutoscalingConfig struct {
+	// MinReplicas is the lower bound for the number of replicas.
+	// +optional
+	MinReplicas *int32 `json:"minReplicas,omitempty"`
+
+	// MaxReplicas is the upper bound for the number of replicas.
+	// +kubebuilder:validation:Minimum=1
+	MaxReplicas int32 `json:"maxReplicas"`
+
+	// TargetCPUUtilizationPercentage is the average CPU target across pods.
+	// +optional
+	TargetCPUUtilizationPercentage *int32 `json:"targetCPUUtilizationPercentage,omitempty"`
+}
+
+// PodDisruptionBudgetConfig configures a PodDisruptionBudget for the data plane.
+type PodDisruptionBudgetConfig struct {
+	// MinAvailable is the minimum number of available pods.
+	// +optional
+	MinAvailable *intstr.IntOrString `json:"minAvailable,omitempty"`
+
+	// MaxUnavailable is the maximum number of unavailable pods.
+	// +optional
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
+}
+
+// LogsConfig configures the data plane logging.
+type LogsConfig struct {
+	// Level is the log level (DEBUG, INFO, WARN, ERROR).
+	// +optional
+	Level string `json:"level,omitempty"`
+}
+
+// MetricsConfig configures the data plane metrics.
+type MetricsConfig struct {
+	// Prometheus enables the Prometheus metrics endpoint on a dedicated
+	// "metrics" entry point.
+	// +optional
+	Prometheus bool `json:"prometheus,omitempty"`
+}
+
+// TracingConfig configures the data plane tracing.
+type TracingConfig struct {
+	// OTLPEndpoint enables OTLP tracing to the given HTTP endpoint.
+	// +optional
+	OTLPEndpoint string `json:"otlpEndpoint,omitempty"`
 }
 
 // DeploymentMode selects where the data plane resource set is created.
