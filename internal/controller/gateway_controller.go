@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
@@ -51,6 +52,8 @@ type GatewayReconciler struct {
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile provisions the data plane for a Gateway and writes its status.
 func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -225,47 +228,29 @@ func (r *GatewayReconciler) resolveProxy(ctx context.Context, gw *gwapiv1.Gatewa
 	return &proxy, nil
 }
 
+// fieldManager identifies the operator as the server-side apply owner of the
+// fields it manages.
+const fieldManager = "traefik-operator"
+
 func (r *GatewayReconciler) applySet(ctx context.Context, gw *gwapiv1.Gateway, set *provisioner.ResourceSet, target provisioner.Target) error {
 	// Owner references only work within the Gateway namespace. In Dedicated
 	// mode the data plane lives elsewhere and is reclaimed by the finalizer.
 	owner := !target.Dedicated()
 
-	if err := r.apply(ctx, gw, set.ServiceAccount, owner, func() {}); err != nil {
+	if err := r.apply(ctx, gw, set.ServiceAccount, owner); err != nil {
 		return fmt.Errorf("serviceaccount: %w", err)
 	}
-
-	desiredDep := set.Deployment.DeepCopy()
-	if err := r.apply(ctx, gw, set.Deployment, owner, func() {
-		set.Deployment.Spec = desiredDep.Spec
-		set.Deployment.Labels = desiredDep.Labels
-		set.Deployment.Annotations = desiredDep.Annotations
-	}); err != nil {
+	if err := r.apply(ctx, gw, set.Deployment, owner); err != nil {
 		return fmt.Errorf("deployment: %w", err)
 	}
-
-	desiredSvc := set.Service.DeepCopy()
-	if err := r.apply(ctx, gw, set.Service, owner, func() {
-		// Preserve API-server assigned fields (ClusterIP is immutable).
-		set.Service.Spec.Type = desiredSvc.Spec.Type
-		set.Service.Spec.Selector = desiredSvc.Spec.Selector
-		set.Service.Spec.Ports = desiredSvc.Spec.Ports
-		set.Service.Spec.LoadBalancerClass = desiredSvc.Spec.LoadBalancerClass
-		set.Service.Spec.ExternalIPs = desiredSvc.Spec.ExternalIPs
-		set.Service.Spec.LoadBalancerIP = desiredSvc.Spec.LoadBalancerIP
-		set.Service.Labels = desiredSvc.Labels
-		set.Service.Annotations = desiredSvc.Annotations
-	}); err != nil {
+	if err := r.apply(ctx, gw, set.Service, owner); err != nil {
 		return fmt.Errorf("service: %w", err)
 	}
 
 	om := metav1.ObjectMeta{Name: set.Service.Name, Namespace: set.Service.Namespace}
 
 	if set.PodDisruptionBudget != nil {
-		desired := set.PodDisruptionBudget.DeepCopy()
-		if err := r.apply(ctx, gw, set.PodDisruptionBudget, owner, func() {
-			set.PodDisruptionBudget.Spec = desired.Spec
-			set.PodDisruptionBudget.Labels = desired.Labels
-		}); err != nil {
+		if err := r.apply(ctx, gw, set.PodDisruptionBudget, owner); err != nil {
 			return fmt.Errorf("poddisruptionbudget: %w", err)
 		}
 	} else if err := r.deleteIfExists(ctx, &policyv1.PodDisruptionBudget{ObjectMeta: om}); err != nil {
@@ -273,11 +258,7 @@ func (r *GatewayReconciler) applySet(ctx context.Context, gw *gwapiv1.Gateway, s
 	}
 
 	if set.HPA != nil {
-		desired := set.HPA.DeepCopy()
-		if err := r.apply(ctx, gw, set.HPA, owner, func() {
-			set.HPA.Spec = desired.Spec
-			set.HPA.Labels = desired.Labels
-		}); err != nil {
+		if err := r.apply(ctx, gw, set.HPA, owner); err != nil {
 			return fmt.Errorf("horizontalpodautoscaler: %w", err)
 		}
 	} else if err := r.deleteIfExists(ctx, &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: om}); err != nil {
@@ -295,18 +276,24 @@ func (r *GatewayReconciler) deleteIfExists(ctx context.Context, obj client.Objec
 	return nil
 }
 
-// apply creates or updates obj. When owner is true the Gateway is set as
-// controller owner so Kubernetes garbage collects the resource on Gateway
-// deletion (Gateway-namespace mode).
-func (r *GatewayReconciler) apply(ctx context.Context, gw *gwapiv1.Gateway, obj client.Object, owner bool, mutate func()) error {
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, obj, func() error {
-		mutate()
-		if owner {
-			return controllerutil.SetControllerReference(gw, obj, r.Scheme())
+// apply server-side applies the desired object. Server-side apply only owns the
+// fields the operator sets, leaving server-defaulted fields untouched, which
+// avoids the update churn a full-spec overwrite would cause. When owner is true
+// the Gateway is set as controller owner for garbage collection.
+func (r *GatewayReconciler) apply(ctx context.Context, gw *gwapiv1.Gateway, obj client.Object, owner bool) error {
+	if owner {
+		if err := controllerutil.SetControllerReference(gw, obj, r.Scheme()); err != nil {
+			return err
 		}
-		return nil
-	})
-	return err
+	}
+
+	gvk, err := apiutil.GVKForObject(obj, r.Scheme())
+	if err != nil {
+		return err
+	}
+	obj.GetObjectKind().SetGroupVersionKind(gvk)
+
+	return r.Patch(ctx, obj, client.Apply, client.FieldOwner(fieldManager), client.ForceOwnership)
 }
 
 func (r *GatewayReconciler) observe(ctx context.Context, set *provisioner.ResourceSet, namespace string) (*corev1.Service, *appsv1.Deployment, error) {

@@ -100,8 +100,12 @@ func build(p buildParams) *ResourceSet {
 			Selector: &metav1.LabelSelector{MatchLabels: p.selector},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels:      mergeMaps(p.selector, podLabels(p.proxy)),
-					Annotations: podAnnotations(p.proxy),
+					// Pods carry the full label/annotation set (including
+					// propagated spec.infrastructure metadata, required by the
+					// GatewayInfrastructure conformance test). The selector stays
+					// the stable subset.
+					Labels:      mergeMaps(p.labels, podLabels(p.proxy)),
+					Annotations: mergeMaps(p.annotations, podAnnotations(p.proxy)),
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: p.name,
