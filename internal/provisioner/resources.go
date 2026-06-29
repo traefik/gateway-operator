@@ -137,7 +137,7 @@ func build(p buildParams) *ResourceSet {
 					Containers: []corev1.Container{{
 						Name:      "traefik",
 						Image:     image(p.proxy),
-						Args:      containerArgs(p.refs, p.ports, p.proxy),
+						Args:      containerArgs(p),
 						Ports:     containerPorts(p.ports, p.proxy),
 						Resources: resources(p.proxy),
 					}},
@@ -307,18 +307,22 @@ func infraAnnotations(gw *gwapiv1.Gateway) map[string]string {
 }
 
 // containerArgs builds the data plane Traefik arguments. The kubernetesGateway
-// provider is scoped to the given Gateway references and told not to write
-// Gateway status (the operator is the single writer). Both flags are provided
-// by the in-tree provider, see DESIGN.md section 8. Logging, metrics and
-// tracing are appended from the TraefikProxy configuration.
-func containerArgs(refs []string, ports []int32, proxy *v1alpha1.TraefikProxy) []string {
+// provider is scoped to the data plane's Gateway(s) and reports the address of
+// the Service the operator provisioned for it. GatewayClass status is left to
+// the operator (the single GatewayClass writer); the data plane writes its own
+// Gateway, listener and route status. See DESIGN.md section 8.
+func containerArgs(p buildParams) []string {
+	proxy := p.proxy
 	args := []string{
 		"--providers.kubernetesGateway=true",
-		fmt.Sprintf("--providers.kubernetesGateway.gateway=%s", strings.Join(refs, ",")),
-		"--providers.kubernetesGateway.disableGatewayStatus=true",
+		fmt.Sprintf("--providers.kubernetesGateway.gateway=%s", strings.Join(p.refs, ",")),
+		"--providers.kubernetesGateway.disableGatewayClassStatus=true",
+		"--providers.kubernetesGateway.experimentalChannel=true",
+		fmt.Sprintf("--providers.kubernetesGateway.statusAddress.service.name=%s", p.name),
+		fmt.Sprintf("--providers.kubernetesGateway.statusAddress.service.namespace=%s", p.namespace),
 	}
-	for _, p := range ports {
-		args = append(args, fmt.Sprintf("--entryPoints.%s.address=:%d", entryPointName(p), p))
+	for _, port := range p.ports {
+		args = append(args, fmt.Sprintf("--entryPoints.%s.address=:%d", entryPointName(port), port))
 	}
 
 	if proxy == nil {

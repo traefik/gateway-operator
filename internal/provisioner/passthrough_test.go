@@ -4,12 +4,28 @@ import (
 	"strings"
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/traefik/traefik-operator/api/v1alpha1"
 )
+
+func listener(name string, port gwapiv1.PortNumber, proto gwapiv1.ProtocolType, host string) gwapiv1.Listener {
+	l := gwapiv1.Listener{Name: gwapiv1.SectionName(name), Port: port, Protocol: proto}
+	if host != "" {
+		l.Hostname = ptr.To(gwapiv1.Hostname(host))
+	}
+	return l
+}
+
+func mkGateway(ns, name string, ls ...gwapiv1.Listener) *gwapiv1.Gateway {
+	return &gwapiv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+		Spec:       gwapiv1.GatewaySpec{Listeners: ls},
+	}
+}
 
 func hasArg(args []string, want string) bool {
 	for _, a := range args {

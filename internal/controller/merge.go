@@ -10,7 +10,6 @@ import (
 
 	"github.com/traefik/traefik-operator/api/v1alpha1"
 	"github.com/traefik/traefik-operator/internal/provisioner"
-	"github.com/traefik/traefik-operator/internal/status"
 )
 
 // reconcileMerged provisions and maintains the single data plane shared by all
@@ -50,14 +49,6 @@ func (r *GatewayReconciler) reconcileMerged(ctx context.Context, gw *gwapiv1.Gat
 		return ctrl.Result{}, nil
 	}
 
-	if !status.AllAddressesSupported(gw) {
-		r.writeUnsupportedAddress(gw)
-		if err := r.Status().Update(ctx, gw); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
-	}
-
 	if changed := r.reconcileFinalizer(gw, target); changed {
 		if err := r.Update(ctx, gw); err != nil {
 			return ctrl.Result{}, err
@@ -66,22 +57,6 @@ func (r *GatewayReconciler) reconcileMerged(ctx context.Context, gw *gwapiv1.Gat
 
 	set := provisioner.RenderMerged(target.MergeKey, members, proxy, target.Namespace)
 	if err := r.applySet(ctx, gw, set, target); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	svc, dep, err := r.observe(ctx, set, target.Namespace)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	nodeAddrs, err := r.nodeAddresses(ctx, svc)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	conflicts := provisioner.DetectListenerConflicts(members)
-	r.writeStatus(gw, svc, dep, nodeAddrs, conflicts)
-	if err := r.Status().Update(ctx, gw); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil

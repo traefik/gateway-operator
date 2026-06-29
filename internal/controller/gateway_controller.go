@@ -10,7 +10,6 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -21,7 +20,6 @@ import (
 
 	"github.com/traefik/traefik-operator/api/v1alpha1"
 	"github.com/traefik/traefik-operator/internal/provisioner"
-	"github.com/traefik/traefik-operator/internal/status"
 )
 
 const (
@@ -45,12 +43,10 @@ type GatewayReconciler struct {
 }
 
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways/status,verbs=update;patch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways/finalizers,verbs=update
 // +kubebuilder:rbac:groups=gateway.traefik.io,resources=traefikproxies,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
@@ -58,7 +54,10 @@ type GatewayReconciler struct {
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,verbs=get;list;watch;bind
 
-// Reconcile provisions the data plane for a Gateway and writes its status.
+// Reconcile provisions the data plane for a Gateway. The provisioned data plane
+// (the in-tree kubernetesGateway provider, scoped to this Gateway) is the single
+// writer of Gateway, listener and route status; the operator only provisions
+// infrastructure and owns the GatewayClass status.
 func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var gw gwapiv1.Gateway
 	if err := r.Get(ctx, req.NamespacedName, &gw); err != nil {
@@ -71,7 +70,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 	if !owned {
 		// A Gateway we no longer manage (class changed) may still carry our
-		// finalizer and orphaned Dedicated-mode resources. Clean up.
+		// finalizer and orphaned resources. Clean up.
 		if controllerutil.ContainsFinalizer(&gw, dataPlaneFinalizer) {
 			return ctrl.Result{}, r.finalize(ctx, &gw)
 		}
@@ -84,15 +83,11 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 	target := provisioner.Resolve(&gw, proxy, r.DataPlaneNamespace)
 
-	// Merged Gateways share one data plane for the whole GatewayClass and have
-	// their own provisioning and cleanup lifecycle.
+	// Merged Gateways share one data plane for the whole GatewayClass.
 	if target.Merged {
 		return r.reconcileMerged(ctx, &gw, proxy, target)
 	}
 
-	// Handle deletion: tear down Dedicated-mode resources, then release the
-	// finalizer. Gateway-namespace resources are garbage collected by owner
-	// references and need no finalizer.
 	if !gw.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&gw, dataPlaneFinalizer) {
 			return ctrl.Result{}, r.finalize(ctx, &gw)
@@ -100,18 +95,6 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	// Reject Gateways requesting an address type the operator cannot honor,
-	// without provisioning any data plane for them.
-	if !status.AllAddressesSupported(&gw) {
-		r.writeUnsupportedAddress(&gw)
-		if err := r.Status().Update(ctx, &gw); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
-	}
-
-	// Maintain the finalizer and provisioned-namespace marker for Dedicated
-	// mode; remove them when running in Gateway-namespace mode.
 	if changed := r.reconcileFinalizer(&gw, target); changed {
 		if err := r.Update(ctx, &gw); err != nil {
 			return ctrl.Result{}, err
@@ -120,21 +103,6 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	set := provisioner.Render(&gw, proxy, target.Namespace)
 	if err := r.applySet(ctx, &gw, set, target); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	svc, dep, err := r.observe(ctx, set, target.Namespace)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	nodeAddrs, err := r.nodeAddresses(ctx, svc)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	r.writeStatus(&gw, svc, dep, nodeAddrs, nil)
-	if err := r.Status().Update(ctx, &gw); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
@@ -297,188 +265,6 @@ func (r *GatewayReconciler) apply(ctx context.Context, gw *gwapiv1.Gateway, obj 
 	obj.GetObjectKind().SetGroupVersionKind(gvk)
 
 	return r.Patch(ctx, obj, client.Apply, client.FieldOwner(fieldManager), client.ForceOwnership)
-}
-
-func (r *GatewayReconciler) observe(ctx context.Context, set *provisioner.ResourceSet, namespace string) (*corev1.Service, *appsv1.Deployment, error) {
-	var svc corev1.Service
-	svcPtr := &svc
-	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: set.Service.Name}, &svc); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return nil, nil, err
-		}
-		svcPtr = nil
-	}
-
-	var dep appsv1.Deployment
-	depPtr := &dep
-	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: set.Deployment.Name}, &dep); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return nil, nil, err
-		}
-		depPtr = nil
-	}
-	return svcPtr, depPtr, nil
-}
-
-// nodeAddresses lists node addresses used to populate the status of a NodePort
-// Service. It returns nil for other Service types.
-func (r *GatewayReconciler) nodeAddresses(ctx context.Context, svc *corev1.Service) ([]string, error) {
-	if svc == nil || svc.Spec.Type != corev1.ServiceTypeNodePort {
-		return nil, nil
-	}
-	var nodes corev1.NodeList
-	if err := r.List(ctx, &nodes); err != nil {
-		return nil, err
-	}
-	var addrs []string
-	for i := range nodes.Items {
-		var internal string
-		for _, a := range nodes.Items[i].Status.Addresses {
-			switch a.Type {
-			case corev1.NodeExternalIP:
-				addrs = append(addrs, a.Address)
-			case corev1.NodeInternalIP:
-				internal = a.Address
-			}
-		}
-		// Fall back to the internal IP when no external IP is advertised.
-		if internal != "" && !contains(addrs, internal) {
-			addrs = append(addrs, internal)
-		}
-	}
-	return addrs, nil
-}
-
-func contains(s []string, v string) bool {
-	for _, e := range s {
-		if e == v {
-			return true
-		}
-	}
-	return false
-}
-
-// writeUnsupportedAddress marks a Gateway not accepted because it requests an
-// address type the operator does not support.
-func (r *GatewayReconciler) writeUnsupportedAddress(gw *gwapiv1.Gateway) {
-	gw.Status.Addresses = nil
-	meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{
-		Type:               string(gwapiv1.GatewayConditionAccepted),
-		Status:             metav1.ConditionFalse,
-		Reason:             string(gwapiv1.GatewayReasonUnsupportedAddress),
-		Message:            "Gateway requests an unsupported address type",
-		ObservedGeneration: gw.Generation,
-	})
-	meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{
-		Type:               string(gwapiv1.GatewayConditionProgrammed),
-		Status:             metav1.ConditionFalse,
-		Reason:             string(gwapiv1.GatewayReasonInvalid),
-		Message:            "Gateway not accepted",
-		ObservedGeneration: gw.Generation,
-	})
-	gw.Status.Listeners = r.listenerStatus(gw, metav1.ConditionFalse, nil)
-}
-
-// writeStatus derives and writes the Gateway status. conflicts is the global
-// merged-listener conflict map (nil for non-merged Gateways); it is filtered to
-// this Gateway's listeners.
-func (r *GatewayReconciler) writeStatus(gw *gwapiv1.Gateway, svc *corev1.Service, dep *appsv1.Deployment, nodeAddrs []string, conflicts map[provisioner.ListenerRef]gwapiv1.ListenerConditionReason) {
-	res := status.Derive(gw, svc, dep, nodeAddrs)
-	gw.Status.Addresses = res.Addresses
-
-	meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{
-		Type:               string(gwapiv1.GatewayConditionAccepted),
-		Status:             metav1.ConditionTrue,
-		Reason:             string(gwapiv1.GatewayReasonAccepted),
-		Message:            "Gateway accepted by traefik-operator",
-		ObservedGeneration: gw.Generation,
-	})
-
-	progStatus := metav1.ConditionFalse
-	if res.Programmed {
-		progStatus = metav1.ConditionTrue
-	}
-	meta.SetStatusCondition(&gw.Status.Conditions, metav1.Condition{
-		Type:               string(gwapiv1.GatewayConditionProgrammed),
-		Status:             progStatus,
-		Reason:             string(res.Reason),
-		Message:            res.Message,
-		ObservedGeneration: gw.Generation,
-	})
-
-	gw.Status.Listeners = r.listenerStatus(gw, progStatus, localConflicts(gw, conflicts))
-}
-
-// localConflicts narrows the global conflict map to a single Gateway's
-// listeners.
-func localConflicts(gw *gwapiv1.Gateway, conflicts map[provisioner.ListenerRef]gwapiv1.ListenerConditionReason) map[gwapiv1.SectionName]gwapiv1.ListenerConditionReason {
-	if len(conflicts) == 0 {
-		return nil
-	}
-	local := map[gwapiv1.SectionName]gwapiv1.ListenerConditionReason{}
-	for ref, reason := range conflicts {
-		if ref.GatewayNamespace == gw.Namespace && ref.GatewayName == gw.Name {
-			local[ref.Listener] = reason
-		}
-	}
-	return local
-}
-
-// listenerStatus reports a per-listener status. Full route attachment
-// accounting is delegated to the data plane provider in a later phase. The
-// conflicts map, keyed by listener name, marks listeners that conflict with
-// another listener of the same merged GatewayClass.
-func (r *GatewayReconciler) listenerStatus(gw *gwapiv1.Gateway, prog metav1.ConditionStatus, conflicts map[gwapiv1.SectionName]gwapiv1.ListenerConditionReason) []gwapiv1.ListenerStatus {
-	out := make([]gwapiv1.ListenerStatus, 0, len(gw.Spec.Listeners))
-	for _, l := range gw.Spec.Listeners {
-		ls := gwapiv1.ListenerStatus{
-			Name:           l.Name,
-			SupportedKinds: supportedKinds(l.Protocol),
-			AttachedRoutes: 0,
-		}
-		set := func(t string, s metav1.ConditionStatus, reason string) {
-			meta.SetStatusCondition(&ls.Conditions, metav1.Condition{
-				Type:               t,
-				Status:             s,
-				Reason:             reason,
-				ObservedGeneration: gw.Generation,
-			})
-		}
-
-		if reason, conflicted := conflicts[l.Name]; conflicted {
-			set(string(gwapiv1.ListenerConditionConflicted), metav1.ConditionTrue, string(reason))
-			set(string(gwapiv1.ListenerConditionAccepted), metav1.ConditionTrue, string(gwapiv1.ListenerReasonAccepted))
-			set(string(gwapiv1.ListenerConditionResolvedRefs), metav1.ConditionTrue, string(gwapiv1.ListenerReasonResolvedRefs))
-			set(string(gwapiv1.ListenerConditionProgrammed), metav1.ConditionFalse, string(gwapiv1.ListenerReasonInvalid))
-			out = append(out, ls)
-			continue
-		}
-
-		set(string(gwapiv1.ListenerConditionConflicted), metav1.ConditionFalse, string(gwapiv1.ListenerReasonNoConflicts))
-		set(string(gwapiv1.ListenerConditionAccepted), metav1.ConditionTrue, string(gwapiv1.ListenerReasonAccepted))
-		set(string(gwapiv1.ListenerConditionResolvedRefs), metav1.ConditionTrue, string(gwapiv1.ListenerReasonResolvedRefs))
-		progReason := string(gwapiv1.ListenerReasonProgrammed)
-		if prog != metav1.ConditionTrue {
-			progReason = string(gwapiv1.ListenerReasonPending)
-		}
-		set(string(gwapiv1.ListenerConditionProgrammed), prog, progReason)
-		out = append(out, ls)
-	}
-	return out
-}
-
-func supportedKinds(proto gwapiv1.ProtocolType) []gwapiv1.RouteGroupKind {
-	group := gwapiv1.Group(gwapiv1.GroupName)
-	switch proto {
-	case gwapiv1.HTTPProtocolType, gwapiv1.HTTPSProtocolType:
-		return []gwapiv1.RouteGroupKind{{Group: &group, Kind: "HTTPRoute"}}
-	case gwapiv1.TLSProtocolType:
-		return []gwapiv1.RouteGroupKind{{Group: &group, Kind: "TLSRoute"}}
-	case gwapiv1.TCPProtocolType:
-		return []gwapiv1.RouteGroupKind{{Group: &group, Kind: "TCPRoute"}}
-	default:
-		return nil
-	}
 }
 
 // SetupWithManager registers the reconciler and its owned resources.
