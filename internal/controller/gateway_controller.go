@@ -8,6 +8,7 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -54,6 +55,8 @@ type GatewayReconciler struct {
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,verbs=get;list;watch;bind
 
 // Reconcile provisions the data plane for a Gateway and writes its status.
 func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -137,19 +140,12 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	return ctrl.Result{}, nil
 }
 
-// reconcileFinalizer adds the finalizer and provisioned-namespace annotation in
-// Dedicated mode, and removes them otherwise. It reports whether the Gateway
-// metadata changed and needs an update.
+// reconcileFinalizer adds the finalizer and records the provisioned namespace.
+// The finalizer is required in every mode because the operator owns a
+// cluster-scoped ClusterRoleBinding per data plane, which cannot be garbage
+// collected through the namespaced Gateway owner reference. It reports whether
+// the Gateway metadata changed and needs an update.
 func (r *GatewayReconciler) reconcileFinalizer(gw *gwapiv1.Gateway, target provisioner.Target) bool {
-	if !target.Dedicated() {
-		removed := controllerutil.RemoveFinalizer(gw, dataPlaneFinalizer)
-		if gw.Annotations[provisionedNamespaceAnnotation] != "" {
-			delete(gw.Annotations, provisionedNamespaceAnnotation)
-			removed = true
-		}
-		return removed
-	}
-
 	changed := controllerutil.AddFinalizer(gw, dataPlaneFinalizer)
 	if gw.Annotations[provisionedNamespaceAnnotation] != target.Namespace {
 		if gw.Annotations == nil {
@@ -191,6 +187,8 @@ func (r *GatewayReconciler) deleteSet(ctx context.Context, namespace, name strin
 		&corev1.ServiceAccount{ObjectMeta: om},
 		&policyv1.PodDisruptionBudget{ObjectMeta: om},
 		&autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: om},
+		// Cluster-scoped, named the same, no namespace.
+		&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: name}},
 	} {
 		if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
 			return err
@@ -239,6 +237,11 @@ func (r *GatewayReconciler) applySet(ctx context.Context, gw *gwapiv1.Gateway, s
 
 	if err := r.apply(ctx, gw, set.ServiceAccount, owner); err != nil {
 		return fmt.Errorf("serviceaccount: %w", err)
+	}
+	// The ClusterRoleBinding is cluster-scoped and cannot be owned by the
+	// namespaced Gateway; it is reclaimed by the finalizer instead.
+	if err := r.apply(ctx, gw, set.ClusterRoleBinding, false); err != nil {
+		return fmt.Errorf("clusterrolebinding: %w", err)
 	}
 	if err := r.apply(ctx, gw, set.Deployment, owner); err != nil {
 		return fmt.Errorf("deployment: %w", err)

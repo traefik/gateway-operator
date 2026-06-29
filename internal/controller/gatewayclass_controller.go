@@ -39,6 +39,7 @@ func (r *GatewayClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		Message:            "Handled by traefik-operator",
 		ObservedGeneration: gc.Generation,
 	})
+	gc.Status.SupportedFeatures = supportedFeatures()
 
 	if err := r.Status().Update(ctx, &gc); err != nil {
 		return ctrl.Result{}, err

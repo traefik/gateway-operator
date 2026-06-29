@@ -8,6 +8,7 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -98,13 +99,25 @@ func TestReconcile_GatewayNamespaceMode(t *testing.T) {
 		t.Fatalf("expected gateway owner reference, got %+v", dep.OwnerReferences)
 	}
 
-	// No finalizer in gateway-namespace mode.
+	// Finalizer is present in every mode (cluster-scoped binding cleanup).
 	var got gwapiv1.Gateway
 	if err := cl.Get(context.Background(), types.NamespacedName{Namespace: "app", Name: "gw"}, &got); err != nil {
 		t.Fatal(err)
 	}
-	if controllerutil.ContainsFinalizer(&got, dataPlaneFinalizer) {
-		t.Fatal("did not expect a finalizer in gateway-namespace mode")
+	if !controllerutil.ContainsFinalizer(&got, dataPlaneFinalizer) {
+		t.Fatal("expected the data-plane finalizer")
+	}
+
+	// A ClusterRoleBinding grants the data plane ServiceAccount its role.
+	var crb rbacv1.ClusterRoleBinding
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: name}, &crb); err != nil {
+		t.Fatalf("expected clusterrolebinding: %v", err)
+	}
+	if crb.RoleRef.Name != provisioner.DataPlaneClusterRole {
+		t.Fatalf("unexpected roleRef %q", crb.RoleRef.Name)
+	}
+	if len(crb.Subjects) != 1 || crb.Subjects[0].Name != name || crb.Subjects[0].Namespace != "app" {
+		t.Fatalf("unexpected subjects %+v", crb.Subjects)
 	}
 }
 
@@ -179,6 +192,10 @@ func TestReconcile_DedicatedModeLifecycle(t *testing.T) {
 	err := cl.Get(ctx, types.NamespacedName{Namespace: "app", Name: "gw"}, &gwapiv1.Gateway{})
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("expected gateway removed after finalizer release, got %v", err)
+	}
+	// The cluster-scoped binding is cleaned up by the finalizer.
+	if err := cl.Get(ctx, types.NamespacedName{Name: name}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected clusterrolebinding deleted, got %v", err)
 	}
 }
 

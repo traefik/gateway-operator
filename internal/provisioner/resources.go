@@ -9,6 +9,7 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
@@ -20,10 +21,17 @@ import (
 // metricsPort is the container port exposing Prometheus metrics.
 const metricsPort int32 = 9100
 
+// DataPlaneClusterRole is the name of the static ClusterRole the operator binds
+// to each provisioned data plane ServiceAccount. It carries the read and status
+// permissions the in-tree kubernetesGateway provider requires, and is shipped
+// with the operator install (config/rbac/dataplane_role.yaml).
+const DataPlaneClusterRole = "traefik-gateway-dataplane"
+
 // ResourceSet is the data plane resource set provisioned for one Gateway.
 // PodDisruptionBudget and HorizontalPodAutoscaler are nil unless configured.
 type ResourceSet struct {
 	ServiceAccount      *corev1.ServiceAccount
+	ClusterRoleBinding  *rbacv1.ClusterRoleBinding
 	Deployment          *appsv1.Deployment
 	Service             *corev1.Service
 	PodDisruptionBudget *policyv1.PodDisruptionBudget
@@ -93,6 +101,23 @@ func build(p buildParams) *ResourceSet {
 
 	sa := &corev1.ServiceAccount{ObjectMeta: om}
 
+	// Cluster-scoped binding granting the data plane ServiceAccount the
+	// gateway-provider read/status permissions. Cluster-scoped, so it carries
+	// no namespace and is reclaimed by the Gateway finalizer.
+	crb := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: p.name, Labels: p.labels},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "ClusterRole",
+			Name:     DataPlaneClusterRole,
+		},
+		Subjects: []rbacv1.Subject{{
+			Kind:      rbacv1.ServiceAccountKind,
+			Name:      p.name,
+			Namespace: p.namespace,
+		}},
+	}
+
 	dep := &appsv1.Deployment{
 		ObjectMeta: om,
 		Spec: appsv1.DeploymentSpec{
@@ -133,6 +158,7 @@ func build(p buildParams) *ResourceSet {
 
 	return &ResourceSet{
 		ServiceAccount:      sa,
+		ClusterRoleBinding:  crb,
 		Deployment:          dep,
 		Service:             svc,
 		PodDisruptionBudget: buildPDB(p, om),
