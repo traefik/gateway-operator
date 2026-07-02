@@ -17,5 +17,5 @@ rules:
   resources: [gatewayclasses, gateways, httproutes, grpcroutes, tcproutes, tlsroutes, referencegrants, backendtlspolicies]
   verbs: [get, list, watch]
 - apiGroups: [gateway.networking.k8s.io]
-  resources: [gateways/status, gatewayclasses/status, httproutes/status, grpcroutes/status, tcproutes/status, tlsroutes/status]
+  resources: [gateways/status, gatewayclasses/status, httproutes/status, grpcroutes/status, tcproutes/status, tlsroutes/status, backendtlspolicies/status]
   verbs: [update, patch]
