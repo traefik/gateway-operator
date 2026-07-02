@@ -10,9 +10,10 @@ import (
 
 // supportedFeatures returns the Gateway API features the operator and its
 // provisioned Traefik data plane support, published on the GatewayClass status.
-// Routing features mirror the in-tree kubernetesGateway provider; the operator
-// adds the Gateway features it implements itself (static addresses,
-// infrastructure propagation).
+// Routing features mirror the in-tree kubernetesGateway provider of the
+// targeted Traefik version (v3.7, pkg/provider/kubernetes/gateway/features.go);
+// keep them in sync when bumping the data plane. The operator adds the Gateway
+// features it implements itself (static addresses, infrastructure propagation).
 func supportedFeatures() []gwapiv1.SupportedFeature {
 	featureSet := sets.New[features.Feature]().
 		Insert(features.GatewayCoreFeatures.UnsortedList()...).
@@ -22,6 +23,7 @@ func supportedFeatures() []gwapiv1.SupportedFeature {
 		Insert(features.ReferenceGrantCoreFeatures.UnsortedList()...).
 		Insert(features.BackendTLSPolicyCoreFeatures.UnsortedList()...).
 		Insert(features.GRPCRouteCoreFeatures.UnsortedList()...).
+		Insert(features.GRPCRouteExtendedFeatures.Intersection(extendedGRPCRouteFeatures()).UnsortedList()...).
 		Insert(features.TLSRouteCoreFeatures.UnsortedList()...).
 		Insert(features.TLSRouteExtendedFeatures.Intersection(extendedTLSRouteFeatures()).UnsortedList()...)
 
@@ -57,6 +59,9 @@ func extendedHTTPRouteFeatures() sets.Set[features.Feature] {
 		features.HTTPRouteMethodMatchingFeature,
 		features.HTTPRoutePortRedirectFeature,
 		features.HTTPRouteSchemeRedirectFeature,
+		features.HTTPRoute303RedirectStatusCodeFeature,
+		features.HTTPRoute307RedirectStatusCodeFeature,
+		features.HTTPRoute308RedirectStatusCodeFeature,
 		features.HTTPRouteHostRewriteFeature,
 		features.HTTPRoutePathRewriteFeature,
 		features.HTTPRoutePathRedirectFeature,
@@ -65,5 +70,13 @@ func extendedHTTPRouteFeatures() sets.Set[features.Feature] {
 		features.HTTPRouteBackendProtocolWebSocketFeature,
 		features.HTTPRouteDestinationPortMatchingFeature,
 		features.HTTPRouteBackendRequestHeaderModificationFeature,
+		features.HTTPRouteNamedRouteRule,
+		features.HTTPRouteParentRefPortFeature,
+	)
+}
+
+func extendedGRPCRouteFeatures() sets.Set[features.Feature] {
+	return sets.New(
+		features.GRPCRouteNamedRouteRule,
 	)
 }
