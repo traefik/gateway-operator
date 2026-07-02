@@ -1,8 +1,10 @@
 # Traefik Operator: Design
 
-Status: draft
+Status: implemented (phases 0 to 4), validated against the Gateway API v1.5.1
+conformance suite. See the user documentation for current behavior; this
+document records the design and its rationale.
 Owners: @traefik/maintainers
-Last updated: 2026-06-24
+Last updated: 2026-07-02
 
 ## 1. Motivation
 

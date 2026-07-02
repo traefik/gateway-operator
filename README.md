@@ -1,54 +1,161 @@
 # Traefik Operator
 
-Kubernetes operator that provisions and manages Traefik data planes per Gateway
-API `Gateway`, mirroring the Envoy Gateway model.
+A Kubernetes operator that provisions and manages dedicated [Traefik](https://github.com/traefik/traefik)
+data planes for [Gateway API](https://gateway-api.sigs.k8s.io/) Gateways, following the
+model popularized by Envoy Gateway: one `Gateway`, one data plane.
 
-Status: Phases 0 to 3 implemented (see [docs/DESIGN.md](docs/DESIGN.md)
-section 11). The operator provisions a data plane per Gateway, propagates
-`spec.infrastructure` metadata, honors `spec.addresses` static addresses
-(rejecting unsupported address types, gating `Programmed` on the address
-actually being realized), supports LoadBalancer, ClusterIP and NodePort Service
-types, derives Gateway status from the resources it created, supports the
-Gateway-namespace (owner-reference garbage collection) and Dedicated namespace
-(finalizer based cleanup) deployment modes, supports merged Gateways (when
-`mergeGateways` is set, all Gateways of a GatewayClass share one data plane,
-union of listener ports, scoped to every member, with per-listener conflict
-detection), and renders optional HorizontalPodAutoscaler, PodDisruptionBudget,
-log level, Prometheus metrics and OTLP tracing from the TraefikProxy
-configuration. All five design phases (0 to 4) are implemented.
+> Status: experimental. APIs (`gateway.traefik.io/v1alpha1`) may change without notice.
 
 ## Why
 
-Traefik already routes Gateway API traffic through a single shared instance via
-the in tree provider (`pkg/provider/kubernetes/gateway`). That static model
-cannot satisfy Gateway API features that assume a data plane is provisioned per
-Gateway:
+Traefik implements the Gateway API routing contract in-tree: a single, statically
+deployed instance watches every `Gateway` in the cluster and routes all of them
+through one shared data plane. That model is simple and cheap, but it cannot
+satisfy the parts of the Gateway API that assume the implementation *provisions*
+the data plane serving each Gateway:
 
-- `GatewayStaticAddresses`
-- `GatewayInfrastructurePropagation`
-- a correct, per Gateway `status.addresses`
+- a correct, per-Gateway `status.addresses`,
+- `GatewayStaticAddresses`: honoring user-requested `spec.addresses`,
+- `GatewayInfrastructurePropagation`: propagating `spec.infrastructure` labels
+  and annotations onto the generated resources,
+- isolation: one tenant's Gateway saturating a shared instance affects everyone.
 
-This operator provisions a Traefik `Deployment` plus `Service` per Gateway and
-derives each Gateway status from the resources it created.
+This operator closes that gap. For each `Gateway` it creates a dedicated Traefik
+`Deployment`, `Service` and `ServiceAccount`, wires the instance to serve exactly
+that Gateway, and lets Kubernetes garbage-collect everything when the Gateway is
+deleted.
 
 ## What it is not
 
-It does not reimplement Gateway API routing. Provisioned Traefik instances keep
-using the existing in tree provider to translate routes. The operator owns
-infrastructure provisioning and Gateway status only.
+The operator does not reimplement routing. Provisioned Traefik instances run the
+existing in-tree `kubernetesGateway` provider, scoped to their own Gateway: route
+translation, listener validation and status reporting stay in Traefik, where they
+are already implemented and conformance-tested. The operator owns infrastructure
+provisioning and the `GatewayClass` status only.
 
-## Layout
+## How it works
 
-- `api/v1alpha1`: the `TraefikProxy` CRD types (data plane configuration).
-- `internal/provisioner`: renders the data plane resource set (ServiceAccount,
-  Deployment, Service) for a Gateway.
-- `internal/status`: derives `status.addresses` and the `Programmed` condition
-  from the provisioned Service and Deployment, mirroring Envoy Gateway.
-- `internal/controller`: the GatewayClass and Gateway reconcilers.
-- `cmd`: the manager entrypoint.
-- `config`: CRD, RBAC, manager Deployment, and sample manifests.
+```
+                control plane (this operator)              data plane (Traefik)
+  +-------------------------------------------+        +------------------------------+
+  |  GatewayClass controller                  |        |  Traefik Deployment (per GW) |
+  |    Accepted + SupportedFeatures           | create |   kubernetesGateway provider |
+  |                                           +------->|   scoped to its own Gateway  |
+  |  Gateway reconciler                       |        |   writes Gateway, listener   |
+  |    renders SA + Deployment + Service      |        |   and route status           |
+  |    (+ optional HPA, PDB, RBAC binding)    |        |                              |
+  |    server-side apply, owner references    |        |  Service (per GW)            |
+  |    finalizer-based cleanup                |        |   LoadBalancer / ClusterIP / |
+  +-------------------------------------------+        |   NodePort                   |
+                                                        +------------------------------+
+```
 
-## Develop
+Single status writer per resource, no fights:
+
+| Resource | Written by |
+|---|---|
+| `GatewayClass` status (Accepted, SupportedFeatures) | operator |
+| `Gateway`, listener status (Accepted, Programmed, addresses, attachedRoutes) | data plane |
+| Route and policy status (`HTTPRoute`, `TLSRoute`, `BackendTLSPolicy`...) | data plane |
+
+## Features
+
+- Per-Gateway data plane provisioning with owner-reference garbage collection.
+- `spec.infrastructure.labels` and `annotations` propagated onto every generated
+  resource, including Pods.
+- Static addresses: `spec.addresses` rendered onto the data plane `Service`
+  (`externalIPs`, `loadBalancerIP`), with `Programmed` gated on the address
+  actually being realized.
+- `LoadBalancer`, `ClusterIP` and `NodePort` Service types.
+- Deployment modes: Gateway namespace (default), dedicated namespace, and merged
+  Gateways (one shared data plane per GatewayClass).
+- Optional `HorizontalPodAutoscaler` and `PodDisruptionBudget`.
+- Log level, Prometheus metrics and OTLP tracing passthrough.
+- Per-data-plane RBAC: each data plane ServiceAccount is bound to a shipped
+  ClusterRole through an operator-managed ClusterRoleBinding.
+
+## Requirements
+
+- Kubernetes >= 1.31 (Gateway API v1.5 CRDs use CEL features absent from older
+  API servers).
+- [Gateway API v1.5.1](https://github.com/kubernetes-sigs/gateway-api/releases/tag/v1.5.1)
+  CRDs (experimental channel for TLSRoute/TCPRoute support).
+- A Traefik image carrying the `kubernetesGateway` provider options
+  `gateway` and `disableGatewayClassStatus` (see
+  [Data plane requirements](docs/configuration.md#data-plane-requirements)).
+
+## Quick start
+
+Install the CRDs and the operator:
+
+```sh
+kubectl apply -f config/crd
+kubectl apply -f config/rbac
+kubectl apply -f config/manager
+```
+
+Create a `GatewayClass`, its data plane configuration, and a first `Gateway`:
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: traefik
+spec:
+  controllerName: traefik.io/gateway-controller
+  parametersRef:
+    group: gateway.traefik.io
+    kind: TraefikProxy
+    name: default
+---
+apiVersion: gateway.traefik.io/v1alpha1
+kind: TraefikProxy
+metadata:
+  name: default
+spec:
+  deployment:
+    replicas: 2
+  service:
+    type: LoadBalancer
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: my-gateway
+  namespace: default
+spec:
+  gatewayClassName: traefik
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+```
+
+Within seconds the operator provisions a Traefik Deployment and Service for
+`my-gateway`, and the data plane reports the Gateway `Programmed` with the
+address of its own Service. Attach `HTTPRoute`s as with any Gateway API
+implementation.
+
+See [Getting started](docs/getting-started.md) for a complete walkthrough and
+[Configuration](docs/configuration.md) for the full `TraefikProxy` reference.
+
+## Conformance
+
+Validated against the Gateway API v1.5.1 conformance suite (GATEWAY-HTTP
+profile) on kind with MetalLB: 68/73 tests passing, including
+`GatewayStaticAddresses` and `GatewayInfrastructure`, which the static
+single-instance model cannot support. Details and how to reproduce in
+[Conformance](docs/conformance.md).
+
+## Documentation
+
+- [Getting started](docs/getting-started.md)
+- [Configuration reference](docs/configuration.md)
+- [Deployment modes](docs/deployment-modes.md)
+- [Conformance](docs/conformance.md)
+- [Design](docs/DESIGN.md)
+
+## Development
 
 ```sh
 make generate manifests   # regenerate deepcopy, CRD, RBAC
@@ -56,27 +163,3 @@ make build                # build the binary
 make test                 # run unit tests
 make run                  # run against the current kubeconfig
 ```
-
-## Deploy
-
-```sh
-make install              # install the TraefikProxy CRD
-make deploy               # install CRD + RBAC + operator Deployment
-kubectl apply -f config/samples/gatewayclass.yaml
-```
-
-## Data plane flags
-
-The provisioned Traefik instances run the existing in tree Gateway provider,
-scoped to their own Gateway. Two provider options make this work, both
-implemented in the in-tree provider (see DESIGN.md section 8):
-
-- `--providers.kubernetesGateway.gateway=<namespace>/<name>`: scope the data
-  plane to the single Gateway it was provisioned for.
-- `--providers.kubernetesGateway.disableGatewayStatus=true`: stop the data
-  plane from writing Gateway and GatewayClass status, so the operator is the
-  single status writer. Route status is still written by the data plane.
-
-## Design
-
-See [docs/DESIGN.md](docs/DESIGN.md).
