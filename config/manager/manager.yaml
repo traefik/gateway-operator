@@ -46,7 +46,7 @@ spec:
         runAsNonRoot: true
       containers:
       - name: manager
-        image: traefik/traefik-operator:latest
+        image: traefik/operator:latest
         args:
         - --leader-elect
         - --health-probe-bind-address=:8081

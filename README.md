@@ -1,4 +1,4 @@
-# traefik-operator
+# Traefik Operator
 
 Kubernetes operator that provisions and manages Traefik data planes per Gateway
 API `Gateway`, mirroring the Envoy Gateway model.

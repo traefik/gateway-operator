@@ -10,7 +10,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/traefik/traefik-operator/internal/provisioner"
+	"github.com/traefik/operator/internal/provisioner"
 )
 
 // GatewayClassReconciler accepts the GatewayClasses claimed by the operator.

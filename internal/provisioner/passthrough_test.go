@@ -9,7 +9,7 @@ import (
 	"k8s.io/utils/ptr"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/traefik/traefik-operator/api/v1alpha1"
+	"github.com/traefik/operator/api/v1alpha1"
 )
 
 func listener(name string, port gwapiv1.PortNumber, proto gwapiv1.ProtocolType, host string) gwapiv1.Listener {

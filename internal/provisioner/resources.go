@@ -15,7 +15,7 @@ import (
 	"k8s.io/utils/ptr"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/traefik/traefik-operator/api/v1alpha1"
+	"github.com/traefik/operator/api/v1alpha1"
 )
 
 // metricsPort is the container port exposing Prometheus metrics.

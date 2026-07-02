@@ -1,4 +1,4 @@
-module github.com/traefik/traefik-operator
+module github.com/traefik/operator
 
 go 1.26.1
 

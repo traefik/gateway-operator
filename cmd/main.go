@@ -13,8 +13,8 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/traefik/traefik-operator/api/v1alpha1"
-	"github.com/traefik/traefik-operator/internal/controller"
+	"github.com/traefik/operator/api/v1alpha1"
+	"github.com/traefik/operator/internal/controller"
 )
 
 var scheme = runtime.NewScheme()

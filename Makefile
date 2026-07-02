@@ -1,4 +1,4 @@
-IMG ?= traefik/traefik-operator:latest
+IMG ?= traefik/operator:latest
 CONTROLLER_GEN_VERSION ?= v0.18.0
 CONTROLLER_GEN = go run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
 
