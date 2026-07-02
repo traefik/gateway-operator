@@ -7,17 +7,22 @@ v1.5.1.
 ## Results
 
 GATEWAY-HTTP profile, kind (Kubernetes 1.36) with MetalLB, Traefik data plane
-built with the `gateway` and `disableGatewayClassStatus` provider options:
+built with the `gateway` and `disableGatewayClassStatus` provider options. The
+generated report is committed at
+[`conformance/reports/v1.5.1/experimental-dev-default-report.yaml`](../conformance/reports/v1.5.1/experimental-dev-default-report.yaml):
 
-| | |
+| GATEWAY-HTTP profile | Result |
 |---|---|
-| Passing | 68/73 |
-| Including | `GatewayStaticAddresses`, `GatewayInfrastructure`, `GatewayWithAttachedRoutes`, listener status and route attachment accounting, all `BackendTLSPolicy` status tests |
+| Core | success, 33/33 |
+| Extended | 21/22 (one known failure, see below) |
+| Succeeded provisional tests | `GatewayInfrastructure`, `TLSRouteMixedTerminationSameNamespace` |
 
-The per-Gateway provisioning model unlocks the tests the static shared-instance
-model cannot support: `GatewayStaticAddresses` (user-requested addresses honored
-and gated on realization) and `GatewayInfrastructure` (metadata propagated onto
-generated resources).
+Across the whole suite invocation (including tests outside the GATEWAY-HTTP
+profile) the run passes 68/73. The per-Gateway provisioning model unlocks the
+tests the static shared-instance model cannot support:
+`GatewayStaticAddresses` (user-requested addresses honored and gated on
+realization) and `GatewayInfrastructure` (metadata propagated onto generated
+resources).
 
 ### Known failures
 
