@@ -143,7 +143,7 @@ See [Getting started](docs/getting-started.md) for a complete walkthrough and
 ## Conformance
 
 Validated against the Gateway API v1.5.1 conformance suite on kind with
-MetalLB. GATEWAY-HTTP profile: core 33/33, extended 21/22, including
+MetalLB. GATEWAY-HTTP profile: core 33/33, extended 27/28, including
 `GatewayStaticAddresses` and `GatewayInfrastructure`, which the static
 single-instance model cannot support. The generated report lives in
 [`conformance/reports`](conformance/reports); details and reproduction steps

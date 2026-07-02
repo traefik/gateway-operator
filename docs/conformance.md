@@ -14,11 +14,11 @@ generated report is committed at
 | GATEWAY-HTTP profile | Result |
 |---|---|
 | Core | success, 33/33 |
-| Extended | 21/22 (one known failure, see below) |
-| Succeeded provisional tests | `GatewayInfrastructure`, `TLSRouteMixedTerminationSameNamespace` |
+| Extended | 27/28 (one known failure, see below) |
+| Succeeded provisional tests | `GatewayInfrastructure`, `HTTPRoute303Redirect`, `HTTPRoute307Redirect`, `HTTPRoute308Redirect`, `HTTPRouteNamedRule`, `GRPCRouteNamedRule` |
 
 Across the whole suite invocation (including tests outside the GATEWAY-HTTP
-profile) the run passes 68/73. The per-Gateway provisioning model unlocks the
+profile) the run passes 74/80. The per-Gateway provisioning model unlocks the
 tests the static shared-instance model cannot support:
 `GatewayStaticAddresses` (user-requested addresses honored and gated on
 realization) and `GatewayInfrastructure` (metadata propagated onto generated
@@ -28,7 +28,7 @@ resources).
 
 | Test | Cause |
 |---|---|
-| `TLSRouteSimpleSameNamespace`, `TLSRouteTerminateSimpleSameNamespace`, `TLSRouteHostnameIntersection`, `TLSRouteInvalidBackendRefUnknownKind` | Environment: TLS traffic from the test host to fresh MetalLB IPs is unreliable on kind under OrbStack (macOS). The full chain, client TLS through the LB to the raw TCP echo backend, works from inside the cluster. Expected to pass on a Linux cluster with routable LB addresses. |
+| `TLSRoute*` (`SimpleSameNamespace`, `TerminateSimpleSameNamespace`, `MixedTerminationSameNamespace`, `HostnameIntersection`, `InvalidBackendRefUnknownKind`), flaky | Environment: TLS traffic from the test host to fresh MetalLB IPs is unreliable on kind under OrbStack (macOS). The full chain, client TLS through the LB to the raw TCP echo backend, works from inside the cluster. Expected to pass on a Linux cluster with routable LB addresses. |
 | `BackendTLSPolicy` (one subtest) | Real gap in the Traefik data plane: rotating the content of a ConfigMap used as CA by a `BackendTLSPolicy` is not re-reflected without a restart. Tracked as upstream Traefik work. |
 
 ## Reproducing
