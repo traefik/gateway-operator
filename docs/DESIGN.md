@@ -66,23 +66,30 @@ created. This document designs the equivalent for Traefik.
 
 Two planes, clearly separated:
 
-```
-                 control plane (new)                      data plane (existing Traefik)
-  +-------------------------------------------+        +------------------------------+
-  |  traefik-operator                         |        |  Traefik Deployment (per GW) |
-  |                                           | create |   - kubernetesGateway        |
-  |  GatewayClass controller                  +------->|     provider enabled         |
-  |  Gateway provisioner (reconciler)         |        |   - watches its own Gateway  |
-  |  Infrastructure manager (apply/GC)        |        |   - serves routes            |
-  |  Status manager (addresses, Programmed)   |<-------+  Service (per GW)            |
-  |  TraefikProxy config resolver             | watch  |   - LB / ClusterIP / NodePort|
-  +-------------------------------------------+ status +------------------------------+
+```mermaid
+flowchart LR
+    subgraph cp["Control plane: traefik-operator"]
+        gcc["GatewayClass controller"]
+        prov["Gateway provisioner (reconciler)"]
+        infra["Infrastructure manager (apply, GC)"]
+        res["TraefikProxy config resolver"]
+    end
+    subgraph dp["Data plane: existing Traefik, one per Gateway"]
+        tr["Traefik Deployment<br/>kubernetesGateway provider<br/>scoped to its own Gateway<br/>writes Gateway, listener and route status"]
+        svc["Service<br/>LoadBalancer, ClusterIP or NodePort"]
+    end
+    prov -- creates --> tr
+    prov -- creates --> svc
+    svc -. reported as Gateway address .-> tr
 ```
 
-The operator is the only component that writes Gateway and GatewayClass status.
-The provisioned Traefik instances are pure data planes; they are configured to
-NOT write Gateway status (a new flag, see section 8), so there is a single
-writer.
+Status ownership is split so that each resource has a single writer:
+
+- the operator writes the GatewayClass status (Accepted plus a SupportedFeatures
+  set spanning the operator and the data plane),
+- the provisioned data plane writes the Gateway, listener and route status it
+  already computes, and reports the address of the Service the operator created
+  for it (through the provider statusAddress.service option).
 
 ## 4. Components
 
@@ -129,22 +136,22 @@ Resources set `metadata.ownerReferences` to the Gateway so Kubernetes garbage
 collects them when the Gateway is deleted (within namespace scope; cross
 namespace provisioning uses a finalizer plus explicit cleanup, see 6).
 
-### 4.4 Status manager
+### 4.4 Status ownership
 
-Single writer for Gateway status. Logic mirrors Envoy Gateway
-`UpdateGatewayStatusProgrammedCondition`:
+The initial design placed a status manager in the operator, mirroring Envoy
+Gateway `UpdateGatewayStatusProgrammedCondition`. Conformance testing showed
+that approach duplicates, and stubs, the rich per-listener status the in-tree
+provider already computes (attached routes, resolved references, supported
+kinds, conflicts). The design was revised: the data plane is the single writer
+of Gateway, listener and route status, and the operator only writes the
+GatewayClass status.
 
-1. Service not created yet but `spec.addresses` set: populate `status.addresses`
-   from spec, set `Programmed=False`, reason `AddressNotUsable`.
-2. Service present, no `spec.addresses`: derive addresses from the Service:
-   - `LoadBalancer`: the LoadBalancer ingress IP or hostname.
-   - `ClusterIP`: the cluster IPs (filtering `None`).
-   - `NodePort`: node addresses.
-3. Service present and `spec.addresses` set (static addresses): use the Service
-   `externalIPs` or cluster IPs; hostname addresses that cannot be bound report
-   `AddressNotUsable`.
-4. `Programmed=True` only when `status.addresses` is non empty AND the data plane
-   Deployment or DaemonSet reports ready replicas. Cap at 16 addresses.
+To make that possible the provider honors `spec.addresses` itself: requests
+with an unsupported address type are rejected with
+`Accepted=False/UnsupportedAddress`; requested addresses are only reported once
+actually realized by the Service the operator provisioned (the operator renders
+them as `externalIPs`/`loadBalancerIP`), and unrealized requests keep the
+Gateway `Programmed=False/AddressNotUsable`.
 
 ### 4.5 TraefikProxy config resolver
 
@@ -225,31 +232,12 @@ Mirror the Envoy Gateway topologies:
 
 ## 7. Reconciliation flow (per Gateway)
 
-```
-Gateway event
-   |
-   v
-resolve TraefikProxy config (GatewayClass default + override)
-   |
-   v
-render resource set (SA, Deployment/DaemonSet, Service, [ConfigMap])
-   - inject gateway-name label
-   - inject spec.infrastructure.labels + annotations
-   - set ownerReferences (or finalizer in dedicated-namespace mode)
-   |
-   v
-server-side apply resource set
-   |
-   v
-read provisioned Service + Deployment status
-   |
-   v
-status manager:
-   - compute status.addresses (LB ingress / clusterIP / nodePort / spec.addresses)
-   - set Accepted, Programmed (gated on ready replicas)
-   |
-   v
-write Gateway status (single writer)
+```mermaid
+flowchart TD
+    ev(["Gateway event"]) --> resolve["Resolve TraefikProxy config<br/>(GatewayClass parametersRef)"]
+    resolve --> render["Render resource set:<br/>ServiceAccount, Deployment, Service,<br/>optional HPA, PDB, ClusterRoleBinding.<br/>Inject gateway-name label and<br/>spec.infrastructure labels and annotations.<br/>Owner references, plus a finalizer for<br/>cluster-scoped and cross-namespace resources."]
+    render --> apply["Server-side apply the resource set"]
+    apply --> dpstatus["Data plane starts, scoped to the Gateway,<br/>and writes Gateway, listener and route status<br/>(addresses from its own Service)"]
 ```
 
 ## 8. Relationship to the existing Traefik Gateway provider

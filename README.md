@@ -35,19 +35,20 @@ provisioning and the `GatewayClass` status only.
 
 ## How it works
 
-```
-                control plane (this operator)              data plane (Traefik)
-  +-------------------------------------------+        +------------------------------+
-  |  GatewayClass controller                  |        |  Traefik Deployment (per GW) |
-  |    Accepted + SupportedFeatures           | create |   kubernetesGateway provider |
-  |                                           +------->|   scoped to its own Gateway  |
-  |  Gateway reconciler                       |        |   writes Gateway, listener   |
-  |    renders SA + Deployment + Service      |        |   and route status           |
-  |    (+ optional HPA, PDB, RBAC binding)    |        |                              |
-  |    server-side apply, owner references    |        |  Service (per GW)            |
-  |    finalizer-based cleanup                |        |   LoadBalancer / ClusterIP / |
-  +-------------------------------------------+        |   NodePort                   |
-                                                        +------------------------------+
+```mermaid
+flowchart LR
+    subgraph cp["Control plane: this operator"]
+        gcc["GatewayClass controller<br/>Accepted, SupportedFeatures"]
+        gwr["Gateway reconciler<br/>renders SA, Deployment, Service<br/>optional HPA, PDB, RBAC binding<br/>server-side apply, owner references,<br/>finalizer-based cleanup"]
+    end
+    subgraph dp["Data plane: one per Gateway"]
+        tr["Traefik Deployment<br/>kubernetesGateway provider<br/>scoped to its own Gateway<br/>writes Gateway, listener and route status"]
+        svc["Service<br/>LoadBalancer, ClusterIP or NodePort"]
+    end
+    gw(["Gateway"]) --> gwr
+    gwr -- creates --> tr
+    gwr -- creates --> svc
+    svc -. address .-> tr
 ```
 
 Single status writer per resource, no fights:
