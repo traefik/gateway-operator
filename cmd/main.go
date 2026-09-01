@@ -51,10 +51,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.GatewayClassReconciler{Client: mgr.GetClient()}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "GatewayClass")
-		os.Exit(1)
-	}
 	if err := (&controller.GatewayReconciler{
 		Client:             mgr.GetClient(),
 		DataPlaneNamespace: dataPlaneNamespace,
