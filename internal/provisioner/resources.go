@@ -3,7 +3,6 @@ package provisioner
 import (
 	"fmt"
 	"sort"
-	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
@@ -11,6 +10,7 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -47,7 +47,7 @@ type buildParams struct {
 	labels      map[string]string // applied to every resource (includes selector)
 	annotations map[string]string
 	ports       []int32
-	refs        []string // gateway scoping references "namespace/name"
+	refs        []types.NamespacedName // gateway scoping references "namespace/name"
 	proxy       *v1alpha1.TraefikProxy
 }
 
@@ -62,7 +62,7 @@ func Render(gw *gwapiv1.Gateway, proxy *v1alpha1.TraefikProxy, namespace string)
 		labels:      commonLabels(gw),
 		annotations: infraAnnotations(gw),
 		ports:       listenerPorts(gw),
-		refs:        []string{gw.Namespace + "/" + gw.Name},
+		refs:        []types.NamespacedName{{Namespace: gw.Namespace, Name: gw.Name}},
 		proxy:       proxy,
 	})
 	if proxy != nil && proxy.Spec.Service != nil {
@@ -238,12 +238,14 @@ func mergedPorts(gateways []*gwapiv1.Gateway) []int32 {
 	return ports
 }
 
-func gatewayRefs(gateways []*gwapiv1.Gateway) []string {
-	refs := make([]string, 0, len(gateways))
+func gatewayRefs(gateways []*gwapiv1.Gateway) []types.NamespacedName {
+	refs := make([]types.NamespacedName, 0, len(gateways))
 	for _, gw := range gateways {
-		refs = append(refs, gw.Namespace+"/"+gw.Name)
+		refs = append(refs, types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name})
 	}
-	sort.Strings(refs)
+	sort.SliceStable(refs, func(i, j int) bool {
+		return refs[i].String() < refs[j].String()
+	})
 	return refs
 }
 
@@ -315,11 +317,14 @@ func containerArgs(p buildParams) []string {
 	proxy := p.proxy
 	args := []string{
 		"--providers.kubernetesGateway=true",
-		fmt.Sprintf("--providers.kubernetesGateway.gateway=%s", strings.Join(p.refs, ",")),
 		"--providers.kubernetesGateway.disableGatewayClassStatus=true",
 		"--providers.kubernetesGateway.experimentalChannel=true",
 		fmt.Sprintf("--providers.kubernetesGateway.statusAddress.service.name=%s", p.name),
 		fmt.Sprintf("--providers.kubernetesGateway.statusAddress.service.namespace=%s", p.namespace),
+	}
+	for i, ref := range p.refs {
+		args = append(args, fmt.Sprintf("-providers.kubernetesGateway.gateways[%d].name=%s", i, ref.Name))
+		args = append(args, fmt.Sprintf("-providers.kubernetesGateway.gateways[%d].namespace=%s", i, ref.Namespace))
 	}
 	for _, port := range p.ports {
 		args = append(args, fmt.Sprintf("--entryPoints.%s.address=:%d", entryPointName(port), port))
