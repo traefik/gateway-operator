@@ -25,55 +25,6 @@ import (
 	"github.com/traefik/operator/internal/provisioner"
 )
 
-func testScheme(t *testing.T) *runtime.Scheme {
-	t.Helper()
-	s := runtime.NewScheme()
-	if err := clientgoscheme.AddToScheme(s); err != nil {
-		t.Fatal(err)
-	}
-	if err := gwapiv1.Install(s); err != nil {
-		t.Fatal(err)
-	}
-	if err := v1alpha1.AddToScheme(s); err != nil {
-		t.Fatal(err)
-	}
-	return s
-}
-
-func gatewayClass(name string, ref *gwapiv1.ParametersReference) *gwapiv1.GatewayClass {
-	return &gwapiv1.GatewayClass{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec: gwapiv1.GatewayClassSpec{
-			ControllerName: provisioner.ControllerName,
-			ParametersRef:  ref,
-		},
-	}
-}
-
-func testGateway(ns, name, class string) *gwapiv1.Gateway {
-	return &gwapiv1.Gateway{
-		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
-		Spec: gwapiv1.GatewaySpec{
-			GatewayClassName: gwapiv1.ObjectName(class),
-			Listeners: []gwapiv1.Listener{{
-				Name:     "http",
-				Protocol: gwapiv1.HTTPProtocolType,
-				Port:     8080,
-			}},
-		},
-	}
-}
-
-func reconcile(t *testing.T, r *GatewayReconciler, gw *gwapiv1.Gateway) {
-	t.Helper()
-	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name},
-	})
-	if err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-}
-
 func TestReconcile_GatewayNamespaceMode(t *testing.T) {
 	s := testScheme(t)
 	gc := gatewayClass("traefik", nil)
@@ -342,5 +293,54 @@ func TestReconcile_AutoscalingAndPDBLifecycle(t *testing.T) {
 	}
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app", Name: name}, &policyv1.PodDisruptionBudget{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("expected PDB removed, got %v", err)
+	}
+}
+
+func testScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	s := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	if err := gwapiv1.Install(s); err != nil {
+		t.Fatal(err)
+	}
+	if err := v1alpha1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func gatewayClass(name string, ref *gwapiv1.ParametersReference) *gwapiv1.GatewayClass {
+	return &gwapiv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: gwapiv1.GatewayClassSpec{
+			ControllerName: provisioner.ControllerName,
+			ParametersRef:  ref,
+		},
+	}
+}
+
+func testGateway(ns, name, class string) *gwapiv1.Gateway {
+	return &gwapiv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+		Spec: gwapiv1.GatewaySpec{
+			GatewayClassName: gwapiv1.ObjectName(class),
+			Listeners: []gwapiv1.Listener{{
+				Name:     "http",
+				Protocol: gwapiv1.HTTPProtocolType,
+				Port:     8080,
+			}},
+		},
+	}
+}
+
+func reconcile(t *testing.T, r *GatewayReconciler, gw *gwapiv1.Gateway) {
+	t.Helper()
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name},
+	})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
 	}
 }

@@ -42,6 +42,16 @@ type GatewayReconciler struct {
 	DataPlaneNamespace string
 }
 
+// SetupWithManager registers the reconciler and its owned resources.
+func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&gwapiv1.Gateway{}).
+		Owns(&appsv1.Deployment{}).
+		Owns(&corev1.Service{}).
+		Owns(&corev1.ServiceAccount{}).
+		Complete(r)
+}
+
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways/finalizers,verbs=update
 // +kubebuilder:rbac:groups=gateway.traefik.io,resources=traefikproxies,verbs=get;list;watch
@@ -265,14 +275,4 @@ func (r *GatewayReconciler) apply(ctx context.Context, gw *gwapiv1.Gateway, obj 
 	obj.GetObjectKind().SetGroupVersionKind(gvk)
 
 	return r.Patch(ctx, obj, client.Apply, client.FieldOwner(fieldManager), client.ForceOwnership)
-}
-
-// SetupWithManager registers the reconciler and its owned resources.
-func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&gwapiv1.Gateway{}).
-		Owns(&appsv1.Deployment{}).
-		Owns(&corev1.Service{}).
-		Owns(&corev1.ServiceAccount{}).
-		Complete(r)
 }

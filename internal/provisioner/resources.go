@@ -27,17 +27,6 @@ const metricsPort int32 = 9100
 // with the operator install (config/rbac/dataplane_role.yaml).
 const DataPlaneClusterRole = "traefik-gateway-dataplane"
 
-// ResourceSet is the data plane resource set provisioned for one Gateway.
-// PodDisruptionBudget and HorizontalPodAutoscaler are nil unless configured.
-type ResourceSet struct {
-	ServiceAccount      *corev1.ServiceAccount
-	ClusterRoleBinding  *rbacv1.ClusterRoleBinding
-	Deployment          *appsv1.Deployment
-	Service             *corev1.Service
-	PodDisruptionBudget *policyv1.PodDisruptionBudget
-	HPA                 *autoscalingv2.HorizontalPodAutoscaler
-}
-
 // buildParams describes a data plane resource set to render. It is shared by
 // the single Gateway and merged Gateway rendering paths.
 type buildParams struct {
@@ -49,6 +38,17 @@ type buildParams struct {
 	ports       []int32
 	refs        []types.NamespacedName // gateway scoping references "namespace/name"
 	proxy       *v1alpha1.TraefikProxy
+}
+
+// ResourceSet is the data plane resource set provisioned for one Gateway.
+// PodDisruptionBudget and HorizontalPodAutoscaler are nil unless configured.
+type ResourceSet struct {
+	ServiceAccount      *corev1.ServiceAccount
+	ClusterRoleBinding  *rbacv1.ClusterRoleBinding
+	Deployment          *appsv1.Deployment
+	Service             *corev1.Service
+	PodDisruptionBudget *policyv1.PodDisruptionBudget
+	HPA                 *autoscalingv2.HorizontalPodAutoscaler
 }
 
 // Render builds the desired data plane resource set for a single Gateway,
@@ -89,6 +89,18 @@ func RenderMerged(class string, gateways []*gwapiv1.Gateway, proxy *v1alpha1.Tra
 		refs:      gatewayRefs(gateways),
 		proxy:     proxy,
 	})
+}
+
+// SelectorLabels identify the data plane resources of a Gateway. They are
+// stable and must not include propagated infrastructure labels (those can
+// change). The namespace label keeps them unambiguous when several Gateways
+// share one namespace in Dedicated mode.
+func SelectorLabels(gw *gwapiv1.Gateway) map[string]string {
+	return map[string]string{
+		GatewayNameLabel:      gw.Name,
+		GatewayNamespaceLabel: gw.Namespace,
+		ManagedByLabel:        ManagedByValue,
+	}
 }
 
 func build(p buildParams) *ResourceSet {
@@ -282,18 +294,6 @@ func commonLabels(gw *gwapiv1.Gateway) map[string]string {
 		}
 	}
 	return l
-}
-
-// SelectorLabels identify the data plane resources of a Gateway. They are
-// stable and must not include propagated infrastructure labels (those can
-// change). The namespace label keeps them unambiguous when several Gateways
-// share one namespace in Dedicated mode.
-func SelectorLabels(gw *gwapiv1.Gateway) map[string]string {
-	return map[string]string{
-		GatewayNameLabel:      gw.Name,
-		GatewayNamespaceLabel: gw.Namespace,
-		ManagedByLabel:        ManagedByValue,
-	}
 }
 
 // infraAnnotations carries the propagated spec.infrastructure.annotations.
