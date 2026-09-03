@@ -15,7 +15,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -250,7 +249,7 @@ func TestReconcile_AutoscalingAndPDBLifecycle(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "dp"},
 		Spec: v1alpha1.TraefikProxySpec{
 			Autoscaling:         &v1alpha1.AutoscalingConfig{MaxReplicas: 4},
-			PodDisruptionBudget: &v1alpha1.PodDisruptionBudgetConfig{MinAvailable: ptr.To(intstr.FromInt32(1))},
+			PodDisruptionBudget: &v1alpha1.PodDisruptionBudgetConfig{MinAvailable: new(intstr.FromInt32(1))},
 		},
 	}
 	gw := testGateway("app", "gw", "traefik")

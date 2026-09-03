@@ -1,0 +1,186 @@
+version: "2"
+
+formatters:
+  enable:
+    - gci
+    - gofumpt
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/traefik/gateway-operator)
+  exclusions:
+    generated: lax
+
+linters:
+  default: all
+  disable:
+    - bodyclose # too many false-positive
+    - containedctx # too many false-positive
+    - contextcheck # too many false-positive
+    - cyclop # duplicate of gocyclo
+    - dupl # Too strict
+    - err113 # Too strict
+    - exhaustive # Not relevant
+    - exhaustruct # Deprecated alias, still enabled by default:all.
+    - exhaustruct_v5 # Not relevant
+    - forcetypeassert # Too strict
+    - gomodguard # Deprecated alias, still enabled by default:all.
+    - gochecknoglobals
+    - gochecknoinits
+    - gocognit # Too strict
+    - gosec # Too strict
+    - gosmopolitan # not relevant
+    - ireturn # Not relevant
+    - lll # Not relevant
+    - maintidx # kind of duplicate of gocyclo
+    - makezero # Not relevant
+    - mnd # Too strict
+    - nestif # Too many false-positive.
+    - nilnil # Not relevant
+    - nlreturn # Not relevant
+    - noctx # Too strict
+    - noinlineerr # Too strict
+    - nonamedreturns # Too strict
+    - paralleltest # Not relevant
+    - prealloc # Too many false-positive.
+    - rowserrcheck # not relevant (SQL)
+    - sqlclosecheck # not relevant (SQL)
+    - tagliatelle # Too strict
+    - testpackage # Too strict
+    - tparallel # Not relevant
+    - varnamelen # Not relevant
+    - wrapcheck # Too strict
+    - wsl # Too strict
+    - wsl_v5 # Too strict
+
+  settings:
+    depguard:
+      rules:
+        main:
+          deny:
+            - pkg: github.com/pkg/errors
+              desc: Should be replaced by standard lib errors package
+    godox:
+      keywords:
+        - FIXME
+    gocyclo:
+      min-complexity: 14
+    goconst:
+      min-len: 3
+      min-occurrences: 4
+    funlen:
+      lines: -1
+      statements: 120
+    gomoddirectives:
+      toolchain-pattern: go1\.\d+\.\d+$
+      tool-forbidden: true
+    govet:
+      enable-all: true
+      disable:
+        - shadow
+        - fieldalignment
+    importas:
+      no-unaliased: true
+      alias:
+        - pkg: k8s.io/api/apps/v1
+          alias: appsv1
+        - pkg: k8s.io/api/autoscaling/v2
+          alias: autoscalingv2
+        - pkg: k8s.io/api/core/v1
+          alias: corev1
+        - pkg: k8s.io/api/policy/v1
+          alias: policyv1
+        - pkg: k8s.io/api/rbac/v1
+          alias: rbacv1
+        - pkg: k8s.io/apimachinery/pkg/api/errors
+          alias: apierrors
+        - pkg: k8s.io/apimachinery/pkg/apis/meta/v1
+          alias: metav1
+        - pkg: k8s.io/client-go/kubernetes/scheme
+          alias: clientgoscheme
+        - pkg: sigs.k8s.io/controller-runtime
+          alias: ctrl
+        - pkg: sigs.k8s.io/controller-runtime/pkg/metrics/server
+          alias: metricsserver
+        - pkg: sigs.k8s.io/gateway-api/apis/v1
+          alias: gwapiv1
+    misspell:
+      locale: US
+    modernize:
+      disable:
+        # Dropping the embedded type from a struct literal turns the
+        # ObjectMeta of every Kubernetes object into loose promoted fields,
+        # away from the shape the controller-runtime ecosystem reads.
+        - embedlit
+    revive:
+      rules:
+        - name: struct-tag
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+          disabled: true
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: package-comments
+          disabled: true
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+          disabled: true
+        - name: unreachable-code
+        - name: redefines-builtin-id
+    staticcheck:
+      checks:
+        - all
+        - '-ST1000'
+        - '-ST1003'
+        - '-ST1016'
+        - '-ST1020'
+        - '-ST1021'
+        - '-ST1022'
+    testifylint:
+      disable:
+        - require-error
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - std-error-handling
+    rules:
+      - path: (.+)_test.go
+        linters:
+          - funlen
+          - goconst
+      - path: (.+)_test.go
+        text: ' always receives '
+        linters:
+          - unparam
+      - path: (.+)\.go
+        text: 'struct-tag: unknown option "inline" in json tag'
+        linters:
+          - revive
+      # Client.Apply takes a runtime.ApplyConfiguration, so moving off the
+      # deprecated Apply patch type means generating apply configurations for
+      # every rendered kind. Narrow, so other deprecations still surface.
+      - path: internal/controller/gateway_controller.go
+        text: 'SA1019: sigs.k8s.io/controller-runtime/pkg/client.Apply is deprecated'
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

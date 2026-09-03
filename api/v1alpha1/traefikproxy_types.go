@@ -190,7 +190,8 @@ type TraefikProxy struct {
 type TraefikProxyList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []TraefikProxy `json:"items"`
+
+	Items []TraefikProxy `json:"items"`
 }
 
 func init() {

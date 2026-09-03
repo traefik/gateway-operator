@@ -1,6 +1,7 @@
 package provisioner
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -15,7 +16,7 @@ import (
 func listener(name string, port gwapiv1.PortNumber, proto gwapiv1.ProtocolType, host string) gwapiv1.Listener {
 	l := gwapiv1.Listener{Name: gwapiv1.SectionName(name), Port: port, Protocol: proto}
 	if host != "" {
-		l.Hostname = ptr.To(gwapiv1.Hostname(host))
+		l.Hostname = new(gwapiv1.Hostname(host))
 	}
 	return l
 }
@@ -28,12 +29,7 @@ func mkGateway(ns, name string, ls ...gwapiv1.Listener) *gwapiv1.Gateway {
 }
 
 func hasArg(args []string, want string) bool {
-	for _, a := range args {
-		if a == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(args, want)
 }
 
 func TestRender_Passthrough(t *testing.T) {
@@ -45,7 +41,7 @@ func TestRender_Passthrough(t *testing.T) {
 				TargetCPUUtilizationPercentage: ptr.To[int32](80),
 			},
 			PodDisruptionBudget: &v1alpha1.PodDisruptionBudgetConfig{
-				MinAvailable: ptr.To(intstr.FromInt32(1)),
+				MinAvailable: new(intstr.FromInt32(1)),
 			},
 			Logs:    &v1alpha1.LogsConfig{Level: "DEBUG"},
 			Metrics: &v1alpha1.MetricsConfig{Prometheus: true},

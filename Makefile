@@ -46,3 +46,11 @@ install: manifests ## Install CRDs into the cluster.
 deploy: manifests ## Deploy the operator into the cluster.
 	kubectl apply -f config/crd
 	kubectl apply -f config/manager
+
+.PHONY: lint
+lint: ## Run golangci-lint.
+	golangci-lint run
+
+.PHONY: lint-fix
+lint-fix: ## Run golangci-lint and apply the fixes it can make.
+	golangci-lint run --fix

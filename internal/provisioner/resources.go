@@ -2,6 +2,8 @@ package provisioner
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -246,7 +248,7 @@ func mergedPorts(gateways []*gwapiv1.Gateway) []int32 {
 			ports = append(ports, p)
 		}
 	}
-	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
+	slices.Sort(ports)
 	return ports
 }
 
@@ -319,8 +321,8 @@ func containerArgs(p buildParams) []string {
 		"--providers.kubernetesGateway=true",
 		"--providers.kubernetesGateway.disableGatewayClassStatus=true",
 		"--providers.kubernetesGateway.experimentalChannel=true",
-		fmt.Sprintf("--providers.kubernetesGateway.statusAddress.service.name=%s", p.name),
-		fmt.Sprintf("--providers.kubernetesGateway.statusAddress.service.namespace=%s", p.namespace),
+		"--providers.kubernetesGateway.statusAddress.service.name=" + p.name,
+		"--providers.kubernetesGateway.statusAddress.service.namespace=" + p.namespace,
 	}
 	for i, ref := range p.refs {
 		args = append(args, fmt.Sprintf("-providers.kubernetesGateway.gateways[%d].name=%s", i, ref.Name))
@@ -335,7 +337,7 @@ func containerArgs(p buildParams) []string {
 	}
 
 	if proxy.Spec.Logs != nil && proxy.Spec.Logs.Level != "" {
-		args = append(args, fmt.Sprintf("--log.level=%s", proxy.Spec.Logs.Level))
+		args = append(args, "--log.level="+proxy.Spec.Logs.Level)
 	}
 	if metricsEnabled(proxy) {
 		args = append(args,
@@ -347,7 +349,7 @@ func containerArgs(p buildParams) []string {
 	if proxy.Spec.Tracing != nil && proxy.Spec.Tracing.OTLPEndpoint != "" {
 		args = append(args,
 			"--tracing.otlp=true",
-			fmt.Sprintf("--tracing.otlp.http.endpoint=%s", proxy.Spec.Tracing.OTLPEndpoint),
+			"--tracing.otlp.http.endpoint="+proxy.Spec.Tracing.OTLPEndpoint,
 		)
 	}
 	return args
@@ -361,14 +363,14 @@ func listenerPorts(gw *gwapiv1.Gateway) []int32 {
 	seen := map[int32]struct{}{}
 	var ports []int32
 	for _, l := range gw.Spec.Listeners {
-		p := int32(l.Port)
+		p := l.Port
 		if _, ok := seen[p]; ok {
 			continue
 		}
 		seen[p] = struct{}{}
 		ports = append(ports, p)
 	}
-	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
+	slices.Sort(ports)
 	return ports
 }
 
@@ -462,11 +464,7 @@ func mergeMaps(base, extra map[string]string) map[string]string {
 		return nil
 	}
 	out := map[string]string{}
-	for k, v := range base {
-		out[k] = v
-	}
-	for k, v := range extra {
-		out[k] = v
-	}
+	maps.Copy(out, base)
+	maps.Copy(out, extra)
 	return out
 }
