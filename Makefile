@@ -1,4 +1,4 @@
-IMG ?= traefik/operator:latest
+IMG ?= traefik/gateway-operator:latest
 CONTROLLER_GEN_VERSION ?= v0.18.0
 CONTROLLER_GEN = go run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
 
@@ -28,7 +28,7 @@ test:
 
 .PHONY: build
 build: generate fmt vet ## Build the operator binary.
-	go build -o bin/traefik-operator ./cmd
+	go build -o bin/traefik-gateway-operator ./cmd
 
 .PHONY: run
 run: generate fmt vet ## Run the operator against the current kubeconfig.
@@ -46,3 +46,11 @@ install: manifests ## Install CRDs into the cluster.
 deploy: manifests ## Deploy the operator into the cluster.
 	kubectl apply -f config/crd
 	kubectl apply -f config/manager
+
+.PHONY: lint
+lint: ## Run golangci-lint.
+	golangci-lint run
+
+.PHONY: lint-fix
+lint-fix: ## Run golangci-lint and apply the fixes it can make.
+	golangci-lint run --fix

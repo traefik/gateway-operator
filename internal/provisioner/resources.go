@@ -2,8 +2,8 @@ package provisioner
 
 import (
 	"fmt"
-	"sort"
-	"strings"
+	"maps"
+	"slices"
 
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
@@ -11,11 +11,12 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/traefik/operator/api/v1alpha1"
+	"github.com/traefik/gateway-operator/api/v1alpha1"
 )
 
 // metricsPort is the container port exposing Prometheus metrics.
@@ -27,6 +28,18 @@ const metricsPort int32 = 9100
 // with the operator install (config/rbac/dataplane_role.yaml).
 const DataPlaneClusterRole = "traefik-gateway-dataplane"
 
+// buildParams describes a data plane resource set to render.
+type buildParams struct {
+	name        string
+	namespace   string
+	selector    map[string]string
+	labels      map[string]string // applied to every resource (includes selector)
+	annotations map[string]string
+	ports       []int32
+	refs        []types.NamespacedName // gateway scoping references "namespace/name"
+	proxy       *v1alpha1.TraefikProxy
+}
+
 // ResourceSet is the data plane resource set provisioned for one Gateway.
 // PodDisruptionBudget and HorizontalPodAutoscaler are nil unless configured.
 type ResourceSet struct {
@@ -36,19 +49,6 @@ type ResourceSet struct {
 	Service             *corev1.Service
 	PodDisruptionBudget *policyv1.PodDisruptionBudget
 	HPA                 *autoscalingv2.HorizontalPodAutoscaler
-}
-
-// buildParams describes a data plane resource set to render. It is shared by
-// the single Gateway and merged Gateway rendering paths.
-type buildParams struct {
-	name        string
-	namespace   string
-	selector    map[string]string
-	labels      map[string]string // applied to every resource (includes selector)
-	annotations map[string]string
-	ports       []int32
-	refs        []string // gateway scoping references "namespace/name"
-	proxy       *v1alpha1.TraefikProxy
 }
 
 // Render builds the desired data plane resource set for a single Gateway,
@@ -62,7 +62,7 @@ func Render(gw *gwapiv1.Gateway, proxy *v1alpha1.TraefikProxy, namespace string)
 		labels:      commonLabels(gw),
 		annotations: infraAnnotations(gw),
 		ports:       listenerPorts(gw),
-		refs:        []string{gw.Namespace + "/" + gw.Name},
+		refs:        []types.NamespacedName{{Namespace: gw.Namespace, Name: gw.Name}},
 		proxy:       proxy,
 	})
 	if proxy != nil && proxy.Spec.Service != nil {
@@ -72,23 +72,15 @@ func Render(gw *gwapiv1.Gateway, proxy *v1alpha1.TraefikProxy, namespace string)
 	return set
 }
 
-// RenderMerged builds the single data plane resource set shared by all Gateways
-// of a merged GatewayClass. Listener ports are the union across the merged
-// Gateways and the data plane is scoped to all of them.
-func RenderMerged(class string, gateways []*gwapiv1.Gateway, proxy *v1alpha1.TraefikProxy, namespace string) *ResourceSet {
-	selector := map[string]string{
-		MergeGroupLabel: class,
-		ManagedByLabel:  ManagedByValue,
+// SelectorLabels identify the data plane resources of a Gateway. They are
+// stable and must not include propagated infrastructure labels (those can
+// change).
+func SelectorLabels(gw *gwapiv1.Gateway) map[string]string {
+	return map[string]string{
+		GatewayNameLabel:      gw.Name,
+		GatewayNamespaceLabel: gw.Namespace,
+		ManagedByLabel:        ManagedByValue,
 	}
-	return build(buildParams{
-		name:      MergedResourceName(class),
-		namespace: namespace,
-		selector:  selector,
-		labels:    selector,
-		ports:     mergedPorts(gateways),
-		refs:      gatewayRefs(gateways),
-		proxy:     proxy,
-	})
 }
 
 func build(p buildParams) *ResourceSet {
@@ -222,31 +214,6 @@ func buildHPA(p buildParams, om metav1.ObjectMeta) *autoscalingv2.HorizontalPodA
 	return hpa
 }
 
-func mergedPorts(gateways []*gwapiv1.Gateway) []int32 {
-	seen := map[int32]struct{}{}
-	var ports []int32
-	for _, gw := range gateways {
-		for _, p := range listenerPorts(gw) {
-			if _, ok := seen[p]; ok {
-				continue
-			}
-			seen[p] = struct{}{}
-			ports = append(ports, p)
-		}
-	}
-	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
-	return ports
-}
-
-func gatewayRefs(gateways []*gwapiv1.Gateway) []string {
-	refs := make([]string, 0, len(gateways))
-	for _, gw := range gateways {
-		refs = append(refs, gw.Namespace+"/"+gw.Name)
-	}
-	sort.Strings(refs)
-	return refs
-}
-
 // applyStaticAddresses requests the Gateway spec.addresses on the provisioned
 // Service. IP addresses are set as ExternalIPs (works for every Service type
 // and supports multiple addresses); for a LoadBalancer the first IP is also set
@@ -282,18 +249,6 @@ func commonLabels(gw *gwapiv1.Gateway) map[string]string {
 	return l
 }
 
-// SelectorLabels identify the data plane resources of a Gateway. They are
-// stable and must not include propagated infrastructure labels (those can
-// change). The namespace label keeps them unambiguous when several Gateways
-// share one namespace in Dedicated mode.
-func SelectorLabels(gw *gwapiv1.Gateway) map[string]string {
-	return map[string]string{
-		GatewayNameLabel:      gw.Name,
-		GatewayNamespaceLabel: gw.Namespace,
-		ManagedByLabel:        ManagedByValue,
-	}
-}
-
 // infraAnnotations carries the propagated spec.infrastructure.annotations.
 func infraAnnotations(gw *gwapiv1.Gateway) map[string]string {
 	if gw.Spec.Infrastructure == nil || len(gw.Spec.Infrastructure.Annotations) == 0 {
@@ -315,11 +270,14 @@ func containerArgs(p buildParams) []string {
 	proxy := p.proxy
 	args := []string{
 		"--providers.kubernetesGateway=true",
-		fmt.Sprintf("--providers.kubernetesGateway.gateway=%s", strings.Join(p.refs, ",")),
 		"--providers.kubernetesGateway.disableGatewayClassStatus=true",
 		"--providers.kubernetesGateway.experimentalChannel=true",
-		fmt.Sprintf("--providers.kubernetesGateway.statusAddress.service.name=%s", p.name),
-		fmt.Sprintf("--providers.kubernetesGateway.statusAddress.service.namespace=%s", p.namespace),
+		"--providers.kubernetesGateway.statusAddress.service.name=" + p.name,
+		"--providers.kubernetesGateway.statusAddress.service.namespace=" + p.namespace,
+	}
+	for i, ref := range p.refs {
+		args = append(args, fmt.Sprintf("-providers.kubernetesGateway.gateways[%d].name=%s", i, ref.Name))
+		args = append(args, fmt.Sprintf("-providers.kubernetesGateway.gateways[%d].namespace=%s", i, ref.Namespace))
 	}
 	for _, port := range p.ports {
 		args = append(args, fmt.Sprintf("--entryPoints.%s.address=:%d", entryPointName(port), port))
@@ -330,7 +288,7 @@ func containerArgs(p buildParams) []string {
 	}
 
 	if proxy.Spec.Logs != nil && proxy.Spec.Logs.Level != "" {
-		args = append(args, fmt.Sprintf("--log.level=%s", proxy.Spec.Logs.Level))
+		args = append(args, "--log.level="+proxy.Spec.Logs.Level)
 	}
 	if metricsEnabled(proxy) {
 		args = append(args,
@@ -342,7 +300,7 @@ func containerArgs(p buildParams) []string {
 	if proxy.Spec.Tracing != nil && proxy.Spec.Tracing.OTLPEndpoint != "" {
 		args = append(args,
 			"--tracing.otlp=true",
-			fmt.Sprintf("--tracing.otlp.http.endpoint=%s", proxy.Spec.Tracing.OTLPEndpoint),
+			"--tracing.otlp.http.endpoint="+proxy.Spec.Tracing.OTLPEndpoint,
 		)
 	}
 	return args
@@ -356,14 +314,14 @@ func listenerPorts(gw *gwapiv1.Gateway) []int32 {
 	seen := map[int32]struct{}{}
 	var ports []int32
 	for _, l := range gw.Spec.Listeners {
-		p := int32(l.Port)
+		p := l.Port
 		if _, ok := seen[p]; ok {
 			continue
 		}
 		seen[p] = struct{}{}
 		ports = append(ports, p)
 	}
-	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
+	slices.Sort(ports)
 	return ports
 }
 
@@ -457,11 +415,7 @@ func mergeMaps(base, extra map[string]string) map[string]string {
 		return nil
 	}
 	out := map[string]string{}
-	for k, v := range base {
-		out[k] = v
-	}
-	for k, v := range extra {
-		out[k] = v
-	}
+	maps.Copy(out, base)
+	maps.Copy(out, extra)
 	return out
 }

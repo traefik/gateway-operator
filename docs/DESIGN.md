@@ -40,7 +40,7 @@ created. This document designs the equivalent for Traefik.
 ### Goals
 
 1. Provision a Traefik data plane (Deployment or DaemonSet, Service,
-   ServiceAccount) per Gateway, or per merged group of Gateways.
+   ServiceAccount) per Gateway.
 2. Populate each Gateway `status.addresses` from the Service the operator
    created for that Gateway, and gate the `Programmed` condition on the real
    data plane readiness.
@@ -49,8 +49,8 @@ created. This document designs the equivalent for Traefik.
    onto the generated resources.
 5. Expose data plane configuration through a `TraefikProxy` CRD referenced from
    `GatewayClass.spec.parametersRef`, mirroring the `EnvoyProxy` model.
-6. Support multiple deployment topologies: dedicated namespace, Gateway
-   namespace, and merged Gateways.
+6. Provision the data plane in the Gateway's own namespace, with the Gateway as
+   owner for garbage collection.
 
 ### Non goals
 
@@ -68,7 +68,7 @@ Two planes, clearly separated:
 
 ```mermaid
 flowchart LR
-    subgraph cp["Control plane: traefik-operator"]
+    subgraph cp["Control plane: traefik-gateway-operator"]
         gcc["GatewayClass controller"]
         prov["Gateway provisioner (reconciler)"]
         infra["Infrastructure manager (apply, GC)"]
@@ -116,7 +116,7 @@ Triggers: Gateway create/update/delete, owned resource changes, referenced
 
 ### 4.3 Infrastructure manager
 
-Owns the generated resource set per Gateway (or per merged group):
+Owns the generated resource set per Gateway:
 
 - `ServiceAccount`
 - `Deployment` (default) or `DaemonSet` (configurable via `TraefikProxy`)
@@ -129,12 +129,13 @@ and DNS limits, mirroring Envoy Gateway. All resources carry:
 
 - `gateway.networking.k8s.io/gateway-name: <gateway-name>` (required by the
   `GatewayInfrastructure` conformance test)
-- `app.kubernetes.io/managed-by: traefik-operator`
+- `app.kubernetes.io/managed-by: traefik-gateway-operator`
 - the Gateway `spec.infrastructure.labels` and `annotations`
 
 Resources set `metadata.ownerReferences` to the Gateway so Kubernetes garbage
-collects them when the Gateway is deleted (within namespace scope; cross
-namespace provisioning uses a finalizer plus explicit cleanup, see 6).
+collects them when the Gateway is deleted. The only exception is the
+cluster-scoped `ClusterRoleBinding`, which cannot be owned by a namespaced
+Gateway and is reclaimed by a finalizer plus explicit cleanup (see 6).
 
 ### 4.4 Status ownership
 
@@ -203,39 +204,32 @@ spec:
       websecure:{ address: ":8443" }
     logs:
       level: INFO
-  mergeGateways: false
   telemetry: {}
 ```
 
 The resolver merges the GatewayClass default `TraefikProxy` with any Gateway
 scoped override (last wins, deep merge of maps and lists by key).
 
-## 6. Deployment modes
+## 6. Deployment mode
 
-Mirror the Envoy Gateway topologies:
+The data plane is provisioned in the Gateway's own namespace. `ownerReferences`
+work directly and Kubernetes garbage collects the namespaced resources on
+Gateway deletion. This is what the `GatewayInfrastructure` conformance test
+exercises (it lists ServiceAccounts, Pods, Services in the Gateway namespace and
+checks the `gateway-name` label and propagated metadata).
 
-1. Dedicated namespace (default). All data planes live in the operator namespace
-   (for example `traefik-system`). Cross namespace ownership is not expressible
-   through `ownerReferences`, so the operator uses a finalizer on the Gateway and
-   deletes owned resources explicitly. Resources are labeled with the owning
-   Gateway namespace and name.
-2. Gateway namespace mode. The data plane is provisioned in the Gateway own
-   namespace. `ownerReferences` work directly and Kubernetes garbage collects on
-   Gateway deletion. This mode is what the `GatewayInfrastructure` conformance
-   test exercises (it lists ServiceAccounts, Pods, Services in the Gateway
-   namespace and checks the `gateway-name` label and propagated metadata).
-3. Merged Gateways. When `mergeGateways: true`, all Gateways of a GatewayClass
-   share one data plane. Listeners are merged by port and protocol; conflicting
-   listeners are rejected with a listener condition. `status.addresses` for every
-   merged Gateway points at the shared Service. This is the cost optimized mode
-   and the closest analog to today static Traefik instance.
+The one resource that cannot carry an owner reference is the cluster-scoped
+`ClusterRoleBinding` granting the data plane ServiceAccount its role: a
+cluster-scoped object cannot be owned by a namespaced one. The operator tracks
+each Gateway with a finalizer (`gateway.traefik.io/data-plane`) and deletes the
+binding explicitly when the Gateway is deleted.
 
 ## 7. Reconciliation flow (per Gateway)
 
 ```mermaid
 flowchart TD
     ev(["Gateway event"]) --> resolve["Resolve TraefikProxy config<br/>(GatewayClass parametersRef)"]
-    resolve --> render["Render resource set:<br/>ServiceAccount, Deployment, Service,<br/>optional HPA, PDB, ClusterRoleBinding.<br/>Inject gateway-name label and<br/>spec.infrastructure labels and annotations.<br/>Owner references, plus a finalizer for<br/>cluster-scoped and cross-namespace resources."]
+    resolve --> render["Render resource set:<br/>ServiceAccount, Deployment, Service,<br/>optional HPA, PDB, ClusterRoleBinding.<br/>Inject gateway-name label and<br/>spec.infrastructure labels and annotations.<br/>Owner references, plus a finalizer for<br/>the cluster-scoped ClusterRoleBinding."]
     render --> apply["Server-side apply the resource set"]
     apply --> dpstatus["Data plane starts, scoped to the Gateway,<br/>and writes Gateway, listener and route status<br/>(addresses from its own Service)"]
 ```
@@ -250,8 +244,7 @@ implemented in the in-tree provider:
 1. `--providers.kubernetesGateway.gateway=<namespace>/<name>` scopes a data
    plane instance to the single Gateway it was provisioned for, instead of all
    Gateways in the cluster. Without this, every provisioned instance would try
-   to serve every Gateway. A label selector or a comma list of references can be
-   added later for merged Gateways.
+   to serve every Gateway.
 2. `--providers.kubernetesGateway.disableGatewayStatus=true` stops the data
    plane from writing Gateway and GatewayClass status, so the operator is the
    single status writer. Route status is still written by the data plane, which
@@ -272,7 +265,6 @@ conformance surface (the bulk of the features) in one place.
 | `GatewayInfrastructurePropagation`      | no                       | yes                    |
 | Per Gateway `status.addresses`          | no (shared)              | yes                    |
 | `Programmed` gated on real data plane   | no                       | yes                    |
-| Merged Gateways                         | implicit (one instance)  | yes (opt in)           |
 
 ## 10. RBAC
 
@@ -298,9 +290,7 @@ existing Gateway provider already requires.
    per Gateway addresses and `GatewayInfrastructurePropagation`.
 2. Phase 1: `spec.addresses` static address support, NodePort and ClusterIP
    Service types. Unlocks `GatewayStaticAddresses`.
-3. Phase 2: dedicated namespace mode plus finalizer based GC.
-4. Phase 3: merged Gateways.
-5. Phase 4: autoscaling, PDB, advanced `TraefikProxy` passthrough, metrics and
+3. Phase 2: autoscaling, PDB, advanced `TraefikProxy` passthrough, metrics and
    tracing wiring.
 
 ## 12. Open questions
@@ -312,7 +302,5 @@ existing Gateway provider already requires.
    for it: annotation versus a Traefik specific policy attachment.
 3. How much static Traefik configuration to expose through `TraefikProxy` versus
    keeping it minimal and opinionated.
-4. Whether the data plane scoping flag should be a single Gateway ref or a label
-   selector (relevant for merged Gateways).
-5. Image and version pinning policy for the provisioned Traefik (operator pins a
+4. Image and version pinning policy for the provisioned Traefik (operator pins a
    compatible Traefik version, or user selectable).

@@ -68,8 +68,7 @@ Single status writer per resource, no fights:
   (`externalIPs`, `loadBalancerIP`), with `Programmed` gated on the address
   actually being realized.
 - `LoadBalancer`, `ClusterIP` and `NodePort` Service types.
-- Deployment modes: Gateway namespace (default), dedicated namespace, and merged
-  Gateways (one shared data plane per GatewayClass).
+- One data plane per Gateway, provisioned in the Gateway's own namespace.
 - Optional `HorizontalPodAutoscaler` and `PodDisruptionBudget`.
 - Log level, Prometheus metrics and OTLP tracing passthrough.
 - Per-data-plane RBAC: each data plane ServiceAccount is bound to a shipped

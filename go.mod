@@ -1,6 +1,6 @@
-module github.com/traefik/operator
+module github.com/traefik/gateway-operator
 
-go 1.26.1
+go 1.27.1
 
 require (
 	k8s.io/api v0.35.2

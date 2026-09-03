@@ -156,11 +156,6 @@ spec:
                     description: Level is the log level (DEBUG, INFO, WARN, ERROR).
                     type: string
                 type: object
-              mergeGateways:
-                description: |-
-                  MergeGateways makes all Gateways of the owning GatewayClass share a
-                  single data plane.
-                type: boolean
               metrics:
                 description: Metrics configures the data plane metrics.
                 properties:
@@ -187,23 +182,6 @@ spec:
                     - type: string
                     description: MinAvailable is the minimum number of available pods.
                     x-kubernetes-int-or-string: true
-                type: object
-              provisioning:
-                description: Provisioning controls where and how the data plane is
-                  deployed.
-                properties:
-                  mode:
-                    description: Mode selects the deployment topology. Defaults to
-                      GatewayNamespace.
-                    enum:
-                    - GatewayNamespace
-                    - Dedicated
-                    type: string
-                  namespace:
-                    description: |-
-                      Namespace is the target namespace for the data plane when Mode is
-                      Dedicated. When empty, the operator default namespace is used.
-                    type: string
                 type: object
               service:
                 description: Service configures the data plane Service.
