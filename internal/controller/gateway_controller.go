@@ -54,6 +54,9 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways/finalizers,verbs=update
+// Read-only on GatewayClass: resolving the class a Gateway references and its
+// parametersRef. Its status belongs to the data plane.
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gatewayclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=gateway.traefik.io,resources=traefikproxies,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
@@ -67,7 +70,7 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // Reconcile provisions the data plane for a Gateway. The provisioned data plane
 // (the in-tree kubernetesGateway provider, scoped to this Gateway) is the single
 // writer of Gateway, listener and route status; the operator only provisions
-// infrastructure and owns the GatewayClass status.
+// infrastructure.
 func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var gw gwapiv1.Gateway
 	if err := r.Get(ctx, req.NamespacedName, &gw); err != nil {

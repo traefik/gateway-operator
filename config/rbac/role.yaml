@@ -71,13 +71,6 @@ rules:
 - apiGroups:
   - gateway.networking.k8s.io
   resources:
-  - gatewayclasses/status
-  verbs:
-  - patch
-  - update
-- apiGroups:
-  - gateway.networking.k8s.io
-  resources:
   - gateways
   verbs:
   - get
