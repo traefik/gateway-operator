@@ -137,5 +137,4 @@ kubectl -n default delete gateway my-gateway
 ## Next steps
 
 - Tune the data plane through the [`TraefikProxy` reference](configuration.md).
-- Choose a topology in [Deployment modes](deployment-modes.md): dedicated
-  namespace, or one shared data plane per GatewayClass.
+- Learn how data planes are provisioned in [Deployment modes](deployment-modes.md).

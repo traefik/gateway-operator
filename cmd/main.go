@@ -26,12 +26,11 @@ func init() {
 }
 
 func main() {
-	var metricsAddr, probeAddr, dataPlaneNamespace string
+	var metricsAddr, probeAddr string
 	var enableLeaderElection bool
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "Address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "Address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "Enable leader election for controller manager.")
-	flag.StringVar(&dataPlaneNamespace, "data-plane-namespace", "traefik-gateway-operator-system", "Default namespace for Dedicated-mode data planes.")
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -52,8 +51,7 @@ func main() {
 	}
 
 	if err := (&controller.GatewayReconciler{
-		Client:             mgr.GetClient(),
-		DataPlaneNamespace: dataPlaneNamespace,
+		Client: mgr.GetClient(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Gateway")
 		os.Exit(1)

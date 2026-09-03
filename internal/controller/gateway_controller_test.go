@@ -6,7 +6,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
-	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -35,7 +34,7 @@ func TestReconcile_GatewayNamespaceMode(t *testing.T) {
 		WithStatusSubresource(&gwapiv1.Gateway{}).
 		Build()
 
-	r := &GatewayReconciler{Client: cl, DataPlaneNamespace: "traefik-system"}
+	r := &GatewayReconciler{Client: cl}
 	reconcile(t, r, gw)
 
 	name := provisioner.ResourceName(gw)
@@ -49,7 +48,7 @@ func TestReconcile_GatewayNamespaceMode(t *testing.T) {
 		t.Fatalf("expected gateway owner reference, got %+v", dep.OwnerReferences)
 	}
 
-	// Finalizer is present in every mode (cluster-scoped binding cleanup).
+	// Finalizer is present for the cluster-scoped binding cleanup.
 	var got gwapiv1.Gateway
 	if err := cl.Get(context.Background(), types.NamespacedName{Namespace: "app", Name: "gw"}, &got); err != nil {
 		t.Fatal(err)
@@ -71,59 +70,35 @@ func TestReconcile_GatewayNamespaceMode(t *testing.T) {
 	}
 }
 
-func TestReconcile_DedicatedModeLifecycle(t *testing.T) {
+func TestReconcile_Lifecycle(t *testing.T) {
 	s := testScheme(t)
-	ref := &gwapiv1.ParametersReference{
-		Group: gwapiv1.Group(v1alpha1.GroupVersion.Group),
-		Kind:  "TraefikProxy",
-		Name:  "dp",
-	}
-	gc := gatewayClass("traefik", ref)
-	proxy := &v1alpha1.TraefikProxy{
-		ObjectMeta: metav1.ObjectMeta{Name: "dp"},
-		Spec: v1alpha1.TraefikProxySpec{
-			Provisioning: &v1alpha1.ProvisioningConfig{
-				Mode:      v1alpha1.DedicatedMode,
-				Namespace: "traefik-system",
-			},
-		},
-	}
+	gc := gatewayClass("traefik", nil)
 	gw := testGateway("app", "gw", "traefik")
 
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
-		WithObjects(gc, proxy, gw).
+		WithObjects(gc, gw).
 		WithStatusSubresource(&gwapiv1.Gateway{}).
 		Build()
 
-	r := &GatewayReconciler{Client: cl, DataPlaneNamespace: "fallback"}
+	r := &GatewayReconciler{Client: cl}
 	reconcile(t, r, gw)
 
 	name := provisioner.ResourceName(gw)
 	ctx := context.Background()
 
-	// Deployment is provisioned in the dedicated namespace, without owner ref.
-	var dep appsv1.Deployment
-	if err := cl.Get(ctx, types.NamespacedName{Namespace: "traefik-system", Name: name}, &dep); err != nil {
-		t.Fatalf("expected deployment in dedicated namespace: %v", err)
-	}
-	if len(dep.OwnerReferences) != 0 {
-		t.Fatalf("expected no owner reference in dedicated mode, got %+v", dep.OwnerReferences)
-	}
-	if dep.Labels[provisioner.GatewayNamespaceLabel] != "app" {
-		t.Fatalf("expected gateway-namespace label, got %q", dep.Labels[provisioner.GatewayNamespaceLabel])
+	// Data plane is provisioned in the Gateway's own namespace.
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app", Name: name}, &appsv1.Deployment{}); err != nil {
+		t.Fatalf("expected deployment in gateway namespace: %v", err)
 	}
 
-	// Gateway carries the finalizer and the provisioned-namespace annotation.
+	// Gateway carries the finalizer that guards the cluster-scoped binding.
 	var got gwapiv1.Gateway
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app", Name: "gw"}, &got); err != nil {
 		t.Fatal(err)
 	}
 	if !controllerutil.ContainsFinalizer(&got, dataPlaneFinalizer) {
-		t.Fatal("expected data-plane finalizer in dedicated mode")
-	}
-	if got.Annotations[provisionedNamespaceAnnotation] != "traefik-system" {
-		t.Fatalf("expected provisioned-namespace annotation, got %q", got.Annotations[provisionedNamespaceAnnotation])
+		t.Fatal("expected the data-plane finalizer")
 	}
 
 	// Delete the Gateway: the finalizer keeps it until cleanup runs.
@@ -132,108 +107,12 @@ func TestReconcile_DedicatedModeLifecycle(t *testing.T) {
 	}
 	reconcile(t, r, gw)
 
-	// Data plane is gone and the Gateway is fully removed.
-	if err := cl.Get(ctx, types.NamespacedName{Namespace: "traefik-system", Name: name}, &appsv1.Deployment{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("expected deployment deleted, got %v", err)
-	}
-	if err := cl.Get(ctx, types.NamespacedName{Namespace: "traefik-system", Name: name}, &corev1.Service{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("expected service deleted, got %v", err)
-	}
-	err := cl.Get(ctx, types.NamespacedName{Namespace: "app", Name: "gw"}, &gwapiv1.Gateway{})
-	if !apierrors.IsNotFound(err) {
+	// The Gateway is fully removed and the cluster-scoped binding is cleaned up.
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app", Name: "gw"}, &gwapiv1.Gateway{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("expected gateway removed after finalizer release, got %v", err)
 	}
-	// The cluster-scoped binding is cleaned up by the finalizer.
 	if err := cl.Get(ctx, types.NamespacedName{Name: name}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("expected clusterrolebinding deleted, got %v", err)
-	}
-}
-
-func TestReconcile_MergedGateways(t *testing.T) {
-	s := testScheme(t)
-	ref := &gwapiv1.ParametersReference{
-		Group: gwapiv1.Group(v1alpha1.GroupVersion.Group),
-		Kind:  "TraefikProxy",
-		Name:  "dp",
-	}
-	gc := gatewayClass("traefik", ref)
-	proxy := &v1alpha1.TraefikProxy{
-		ObjectMeta: metav1.ObjectMeta{Name: "dp"},
-		Spec: v1alpha1.TraefikProxySpec{
-			MergeGateways: true,
-			Provisioning:  &v1alpha1.ProvisioningConfig{Namespace: "traefik-system"},
-		},
-	}
-	g1 := testGateway("app1", "g1", "traefik")
-	g2 := testGateway("app2", "g2", "traefik")
-
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(gc, proxy, g1, g2).
-		WithStatusSubresource(&gwapiv1.Gateway{}).
-		Build()
-
-	r := &GatewayReconciler{Client: cl, DataPlaneNamespace: "fallback"}
-	reconcile(t, r, g1)
-	reconcile(t, r, g2)
-
-	ctx := context.Background()
-	shared := provisioner.MergedResourceName("traefik")
-
-	// A single shared data plane exists in the merge namespace.
-	var dep appsv1.Deployment
-	if err := cl.Get(ctx, types.NamespacedName{Namespace: "traefik-system", Name: shared}, &dep); err != nil {
-		t.Fatalf("expected shared deployment: %v", err)
-	}
-	if dep.Labels[provisioner.MergeGroupLabel] != "traefik" {
-		t.Fatalf("expected merge-group label, got %q", dep.Labels[provisioner.MergeGroupLabel])
-	}
-
-	// No per-Gateway data planes were created.
-	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app1", Name: provisioner.ResourceName(g1)}, &appsv1.Deployment{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("did not expect a per-gateway deployment, got %v", err)
-	}
-
-	// Both Gateways carry the finalizer.
-	for _, key := range []types.NamespacedName{{Namespace: "app1", Name: "g1"}, {Namespace: "app2", Name: "g2"}} {
-		var got gwapiv1.Gateway
-		if err := cl.Get(ctx, key, &got); err != nil {
-			t.Fatal(err)
-		}
-		if !controllerutil.ContainsFinalizer(&got, dataPlaneFinalizer) {
-			t.Fatalf("expected finalizer on %s", key)
-		}
-	}
-
-	// Delete g1: the shared data plane survives because g2 remains.
-	var got1 gwapiv1.Gateway
-	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app1", Name: "g1"}, &got1); err != nil {
-		t.Fatal(err)
-	}
-	if err := cl.Delete(ctx, &got1); err != nil {
-		t.Fatal(err)
-	}
-	reconcile(t, r, g1)
-
-	if err := cl.Get(ctx, types.NamespacedName{Namespace: "traefik-system", Name: shared}, &appsv1.Deployment{}); err != nil {
-		t.Fatalf("shared deployment should survive while g2 remains: %v", err)
-	}
-	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app1", Name: "g1"}, &gwapiv1.Gateway{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("expected g1 removed, got %v", err)
-	}
-
-	// Delete g2: the last member leaves, so the shared data plane is torn down.
-	var got2 gwapiv1.Gateway
-	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app2", Name: "g2"}, &got2); err != nil {
-		t.Fatal(err)
-	}
-	if err := cl.Delete(ctx, &got2); err != nil {
-		t.Fatal(err)
-	}
-	reconcile(t, r, g2)
-
-	if err := cl.Get(ctx, types.NamespacedName{Namespace: "traefik-system", Name: shared}, &appsv1.Deployment{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("expected shared deployment torn down, got %v", err)
 	}
 }
 
@@ -260,7 +139,7 @@ func TestReconcile_AutoscalingAndPDBLifecycle(t *testing.T) {
 		WithStatusSubresource(&gwapiv1.Gateway{}).
 		Build()
 
-	r := &GatewayReconciler{Client: cl, DataPlaneNamespace: "traefik-system"}
+	r := &GatewayReconciler{Client: cl}
 	reconcile(t, r, gw)
 
 	ctx := context.Background()

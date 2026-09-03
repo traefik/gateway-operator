@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"sort"
 
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
@@ -29,8 +28,7 @@ const metricsPort int32 = 9100
 // with the operator install (config/rbac/dataplane_role.yaml).
 const DataPlaneClusterRole = "traefik-gateway-dataplane"
 
-// buildParams describes a data plane resource set to render. It is shared by
-// the single Gateway and merged Gateway rendering paths.
+// buildParams describes a data plane resource set to render.
 type buildParams struct {
 	name        string
 	namespace   string
@@ -74,29 +72,9 @@ func Render(gw *gwapiv1.Gateway, proxy *v1alpha1.TraefikProxy, namespace string)
 	return set
 }
 
-// RenderMerged builds the single data plane resource set shared by all Gateways
-// of a merged GatewayClass. Listener ports are the union across the merged
-// Gateways and the data plane is scoped to all of them.
-func RenderMerged(class string, gateways []*gwapiv1.Gateway, proxy *v1alpha1.TraefikProxy, namespace string) *ResourceSet {
-	selector := map[string]string{
-		MergeGroupLabel: class,
-		ManagedByLabel:  ManagedByValue,
-	}
-	return build(buildParams{
-		name:      MergedResourceName(class),
-		namespace: namespace,
-		selector:  selector,
-		labels:    selector,
-		ports:     mergedPorts(gateways),
-		refs:      gatewayRefs(gateways),
-		proxy:     proxy,
-	})
-}
-
 // SelectorLabels identify the data plane resources of a Gateway. They are
 // stable and must not include propagated infrastructure labels (those can
-// change). The namespace label keeps them unambiguous when several Gateways
-// share one namespace in Dedicated mode.
+// change).
 func SelectorLabels(gw *gwapiv1.Gateway) map[string]string {
 	return map[string]string{
 		GatewayNameLabel:      gw.Name,
@@ -234,33 +212,6 @@ func buildHPA(p buildParams, om metav1.ObjectMeta) *autoscalingv2.HorizontalPodA
 		}}
 	}
 	return hpa
-}
-
-func mergedPorts(gateways []*gwapiv1.Gateway) []int32 {
-	seen := map[int32]struct{}{}
-	var ports []int32
-	for _, gw := range gateways {
-		for _, p := range listenerPorts(gw) {
-			if _, ok := seen[p]; ok {
-				continue
-			}
-			seen[p] = struct{}{}
-			ports = append(ports, p)
-		}
-	}
-	slices.Sort(ports)
-	return ports
-}
-
-func gatewayRefs(gateways []*gwapiv1.Gateway) []types.NamespacedName {
-	refs := make([]types.NamespacedName, 0, len(gateways))
-	for _, gw := range gateways {
-		refs = append(refs, types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name})
-	}
-	sort.SliceStable(refs, func(i, j int) bool {
-		return refs[i].String() < refs[j].String()
-	})
-	return refs
 }
 
 // applyStaticAddresses requests the Gateway spec.addresses on the provisioned

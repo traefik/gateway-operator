@@ -22,24 +22,14 @@ import (
 	"github.com/traefik/gateway-operator/internal/provisioner"
 )
 
-const (
-	// dataPlaneFinalizer guards Dedicated-mode data planes, whose resources
-	// live in another namespace and so cannot be garbage collected through
-	// owner references.
-	dataPlaneFinalizer = "gateway.traefik.io/data-plane"
-
-	// provisionedNamespaceAnnotation records where the data plane was
-	// provisioned, so cleanup is reliable even if the TraefikProxy is gone.
-	provisionedNamespaceAnnotation = "gateway.traefik.io/provisioned-namespace"
-)
+// dataPlaneFinalizer guards the data plane's cluster-scoped ClusterRoleBinding,
+// which cannot be garbage collected through the namespaced Gateway owner
+// reference and so is deleted explicitly on Gateway removal.
+const dataPlaneFinalizer = "gateway.traefik.io/data-plane"
 
 // GatewayReconciler provisions a data plane per Gateway and owns its status.
 type GatewayReconciler struct {
 	client.Client
-
-	// DataPlaneNamespace is the default namespace for Dedicated-mode data
-	// planes when the TraefikProxy does not set one.
-	DataPlaneNamespace string
 }
 
 // SetupWithManager registers the reconciler and its owned resources.
@@ -94,12 +84,6 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	target := provisioner.Resolve(&gw, proxy, r.DataPlaneNamespace)
-
-	// Merged Gateways share one data plane for the whole GatewayClass.
-	if target.Merged {
-		return r.reconcileMerged(ctx, &gw, proxy, target)
-	}
 
 	if !gw.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&gw, dataPlaneFinalizer) {
@@ -108,48 +92,27 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	if changed := r.reconcileFinalizer(&gw, target); changed {
+	if controllerutil.AddFinalizer(&gw, dataPlaneFinalizer) {
 		if err := r.Update(ctx, &gw); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 
-	set := provisioner.Render(&gw, proxy, target.Namespace)
-	if err := r.applySet(ctx, &gw, set, target); err != nil {
+	set := provisioner.Render(&gw, proxy, gw.Namespace)
+	if err := r.applySet(ctx, &gw, set); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
 }
 
-// reconcileFinalizer adds the finalizer and records the provisioned namespace.
-// The finalizer is required in every mode because the operator owns a
-// cluster-scoped ClusterRoleBinding per data plane, which cannot be garbage
-// collected through the namespaced Gateway owner reference. It reports whether
-// the Gateway metadata changed and needs an update.
-func (r *GatewayReconciler) reconcileFinalizer(gw *gwapiv1.Gateway, target provisioner.Target) bool {
-	changed := controllerutil.AddFinalizer(gw, dataPlaneFinalizer)
-	if gw.Annotations[provisionedNamespaceAnnotation] != target.Namespace {
-		if gw.Annotations == nil {
-			gw.Annotations = map[string]string{}
-		}
-		gw.Annotations[provisionedNamespaceAnnotation] = target.Namespace
-		changed = true
-	}
-	return changed
-}
-
-// finalize deletes the Dedicated-mode data plane resources and removes the
-// finalizer.
+// finalize deletes the data plane's cluster-scoped ClusterRoleBinding (the only
+// resource not garbage collected through the Gateway owner reference) and
+// removes the finalizer.
 func (r *GatewayReconciler) finalize(ctx context.Context, gw *gwapiv1.Gateway) error {
-	namespace := gw.Annotations[provisionedNamespaceAnnotation]
-	if namespace == "" {
-		namespace = r.DataPlaneNamespace
-	}
-	if err := r.cleanup(ctx, gw, namespace); err != nil {
+	if err := r.cleanup(ctx, gw, gw.Namespace); err != nil {
 		return err
 	}
 	controllerutil.RemoveFinalizer(gw, dataPlaneFinalizer)
-	delete(gw.Annotations, provisionedNamespaceAnnotation)
 	return r.Update(ctx, gw)
 }
 
@@ -211,12 +174,10 @@ func (r *GatewayReconciler) resolveProxy(ctx context.Context, gw *gwapiv1.Gatewa
 // fields it manages.
 const fieldManager = "traefik-gateway-operator"
 
-func (r *GatewayReconciler) applySet(ctx context.Context, gw *gwapiv1.Gateway, set *provisioner.ResourceSet, target provisioner.Target) error {
-	// Owner references only work within the Gateway namespace. In Dedicated
-	// mode the data plane lives elsewhere and is reclaimed by the finalizer.
-	owner := !target.Dedicated()
-
-	if err := r.apply(ctx, gw, set.ServiceAccount, owner); err != nil {
+func (r *GatewayReconciler) applySet(ctx context.Context, gw *gwapiv1.Gateway, set *provisioner.ResourceSet) error {
+	// The data plane lives in the Gateway's own namespace, so every namespaced
+	// resource carries an owner reference to the Gateway for garbage collection.
+	if err := r.apply(ctx, gw, set.ServiceAccount, true); err != nil {
 		return fmt.Errorf("serviceaccount: %w", err)
 	}
 	// The ClusterRoleBinding is cluster-scoped and cannot be owned by the
@@ -224,17 +185,17 @@ func (r *GatewayReconciler) applySet(ctx context.Context, gw *gwapiv1.Gateway, s
 	if err := r.apply(ctx, gw, set.ClusterRoleBinding, false); err != nil {
 		return fmt.Errorf("clusterrolebinding: %w", err)
 	}
-	if err := r.apply(ctx, gw, set.Deployment, owner); err != nil {
+	if err := r.apply(ctx, gw, set.Deployment, true); err != nil {
 		return fmt.Errorf("deployment: %w", err)
 	}
-	if err := r.apply(ctx, gw, set.Service, owner); err != nil {
+	if err := r.apply(ctx, gw, set.Service, true); err != nil {
 		return fmt.Errorf("service: %w", err)
 	}
 
 	om := metav1.ObjectMeta{Name: set.Service.Name, Namespace: set.Service.Namespace}
 
 	if set.PodDisruptionBudget != nil {
-		if err := r.apply(ctx, gw, set.PodDisruptionBudget, owner); err != nil {
+		if err := r.apply(ctx, gw, set.PodDisruptionBudget, true); err != nil {
 			return fmt.Errorf("poddisruptionbudget: %w", err)
 		}
 	} else if err := r.deleteIfExists(ctx, &policyv1.PodDisruptionBudget{ObjectMeta: om}); err != nil {
@@ -242,7 +203,7 @@ func (r *GatewayReconciler) applySet(ctx context.Context, gw *gwapiv1.Gateway, s
 	}
 
 	if set.HPA != nil {
-		if err := r.apply(ctx, gw, set.HPA, owner); err != nil {
+		if err := r.apply(ctx, gw, set.HPA, true); err != nil {
 			return fmt.Errorf("horizontalpodautoscaler: %w", err)
 		}
 	} else if err := r.deleteIfExists(ctx, &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: om}); err != nil {

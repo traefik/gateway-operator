@@ -30,10 +30,6 @@ spec:
       service.beta.kubernetes.io/aws-load-balancer-type: nlb
     loadBalancerClass: my-lb-class
 
-  provisioning:
-    mode: GatewayNamespace    # GatewayNamespace | Dedicated
-    namespace: traefik-system # target namespace when mode is Dedicated
-
   autoscaling:
     minReplicas: 2
     maxReplicas: 10
@@ -50,8 +46,6 @@ spec:
 
   tracing:
     otlpEndpoint: http://otel-collector:4318
-
-  mergeGateways: false        # one shared data plane per GatewayClass
 ```
 
 ### deployment
@@ -71,12 +65,8 @@ spec:
 | `annotations` | none | Added to the Service (cloud LB tuning). |
 | `loadBalancerClass` | none | Selects the load balancer implementation. |
 
-### provisioning
-
-| Field | Default | Description |
-|---|---|---|
-| `mode` | `GatewayNamespace` | Where data planes live. See [Deployment modes](deployment-modes.md). |
-| `namespace` | operator `-data-plane-namespace` flag | Target namespace in `Dedicated` mode. |
+The data plane is always provisioned in the Gateway's own namespace. See
+[Deployment modes](deployment-modes.md).
 
 ### autoscaling, podDisruptionBudget
 
@@ -93,17 +83,10 @@ Pods. Both are removed when their configuration is removed.
 | `metrics.prometheus: true` | dedicated `metrics` entry point on container port 9100, `--metrics.prometheus` |
 | `tracing.otlpEndpoint` | `--tracing.otlp.http.endpoint=<endpoint>` |
 
-### mergeGateways
-
-When `true`, all Gateways of the GatewayClass share a single data plane: union
-of listener ports, scoped to every member. See
-[Deployment modes](deployment-modes.md#merged-gateways).
-
 ## Operator flags
 
 | Flag | Default | Description |
 |---|---|---|
-| `-data-plane-namespace` | `traefik-gateway-operator-system` | Default namespace for `Dedicated`-mode data planes. |
 | `-metrics-bind-address` | `:8080` | Operator metrics endpoint. |
 | `-health-probe-bind-address` | `:8081` | Liveness and readiness probes. |
 | `-leader-elect` | `false` | Enable leader election. |
