@@ -6,7 +6,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/traefik/operator/api/v1alpha1"
+	"github.com/traefik/gateway-operator/api/v1alpha1"
 )
 
 func TestResolve(t *testing.T) {

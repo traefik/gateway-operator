@@ -18,8 +18,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/traefik/operator/api/v1alpha1"
-	"github.com/traefik/operator/internal/provisioner"
+	"github.com/traefik/gateway-operator/api/v1alpha1"
+	"github.com/traefik/gateway-operator/internal/provisioner"
 )
 
 const (
@@ -206,7 +206,7 @@ func (r *GatewayReconciler) resolveProxy(ctx context.Context, gw *gwapiv1.Gatewa
 
 // fieldManager identifies the operator as the server-side apply owner of the
 // fields it manages.
-const fieldManager = "traefik-operator"
+const fieldManager = "traefik-gateway-operator"
 
 func (r *GatewayReconciler) applySet(ctx context.Context, gw *gwapiv1.Gateway, set *provisioner.ResourceSet, target provisioner.Target) error {
 	// Owner references only work within the Gateway namespace. In Dedicated

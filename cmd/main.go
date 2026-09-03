@@ -1,4 +1,4 @@
-// Command traefik-operator runs the Traefik Gateway API operator.
+// Command traefik-gateway-operator runs the Traefik Gateway API operator.
 package main
 
 import (
@@ -13,8 +13,8 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/traefik/operator/api/v1alpha1"
-	"github.com/traefik/operator/internal/controller"
+	"github.com/traefik/gateway-operator/api/v1alpha1"
+	"github.com/traefik/gateway-operator/internal/controller"
 )
 
 var scheme = runtime.NewScheme()
@@ -31,7 +31,7 @@ func main() {
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "Address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "Address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "Enable leader election for controller manager.")
-	flag.StringVar(&dataPlaneNamespace, "data-plane-namespace", "traefik-operator-system", "Default namespace for Dedicated-mode data planes.")
+	flag.StringVar(&dataPlaneNamespace, "data-plane-namespace", "traefik-gateway-operator-system", "Default namespace for Dedicated-mode data planes.")
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -44,7 +44,7 @@ func main() {
 		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "traefik-operator.gateway.traefik.io",
+		LeaderElectionID:       "traefik-gateway-operator.gateway.traefik.io",
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")

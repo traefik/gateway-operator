@@ -3,7 +3,7 @@ package provisioner
 import (
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/traefik/operator/api/v1alpha1"
+	"github.com/traefik/gateway-operator/api/v1alpha1"
 )
 
 // Target is the resolved deployment topology for a Gateway data plane.

@@ -8,8 +8,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/traefik/operator/api/v1alpha1"
-	"github.com/traefik/operator/internal/provisioner"
+	"github.com/traefik/gateway-operator/api/v1alpha1"
+	"github.com/traefik/gateway-operator/internal/provisioner"
 )
 
 // reconcileMerged provisions and maintains the single data plane shared by all

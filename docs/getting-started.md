@@ -28,7 +28,7 @@ kubectl apply -f config/manager  # namespace, ServiceAccount, Deployment
 Check that the operator is running:
 
 ```sh
-kubectl -n traefik-operator-system get pods
+kubectl -n traefik-gateway-operator-system get pods
 ```
 
 ## 3. Create a GatewayClass and its data plane configuration

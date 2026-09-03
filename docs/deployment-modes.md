@@ -68,7 +68,7 @@ and carry:
 | `gateway.networking.k8s.io/gateway-name` | Gateway API standard, used by conformance |
 | `gateway.traefik.io/gateway-namespace` | disambiguation across namespaces |
 | `gateway.traefik.io/merge-group` | GatewayClass name, merged mode only |
-| `app.kubernetes.io/managed-by: traefik-operator` | operator marker |
+| `app.kubernetes.io/managed-by: traefik-gateway-operator` | operator marker |
 
 `spec.infrastructure.labels` and `annotations` from the Gateway are added to
 every generated resource, including the Pod template.

@@ -21,8 +21,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/traefik/operator/api/v1alpha1"
-	"github.com/traefik/operator/internal/provisioner"
+	"github.com/traefik/gateway-operator/api/v1alpha1"
+	"github.com/traefik/gateway-operator/internal/provisioner"
 )
 
 func TestReconcile_GatewayNamespaceMode(t *testing.T) {

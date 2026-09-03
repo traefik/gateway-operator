@@ -68,7 +68,7 @@ Two planes, clearly separated:
 
 ```mermaid
 flowchart LR
-    subgraph cp["Control plane: traefik-operator"]
+    subgraph cp["Control plane: traefik-gateway-operator"]
         gcc["GatewayClass controller"]
         prov["Gateway provisioner (reconciler)"]
         infra["Infrastructure manager (apply, GC)"]
@@ -129,7 +129,7 @@ and DNS limits, mirroring Envoy Gateway. All resources carry:
 
 - `gateway.networking.k8s.io/gateway-name: <gateway-name>` (required by the
   `GatewayInfrastructure` conformance test)
-- `app.kubernetes.io/managed-by: traefik-operator`
+- `app.kubernetes.io/managed-by: traefik-gateway-operator`
 - the Gateway `spec.infrastructure.labels` and `annotations`
 
 Resources set `metadata.ownerReferences` to the Gateway so Kubernetes garbage

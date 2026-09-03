@@ -30,7 +30,7 @@ const (
 	ManagedByLabel = "app.kubernetes.io/managed-by"
 
 	// ManagedByValue is the value of ManagedByLabel.
-	ManagedByValue = "traefik-operator"
+	ManagedByValue = "traefik-gateway-operator"
 
 	// DefaultImage is the data plane image used when none is configured.
 	DefaultImage = "traefik:v3.7"

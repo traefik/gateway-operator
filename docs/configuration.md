@@ -103,7 +103,7 @@ of listener ports, scoped to every member. See
 
 | Flag | Default | Description |
 |---|---|---|
-| `-data-plane-namespace` | `traefik-operator-system` | Default namespace for `Dedicated`-mode data planes. |
+| `-data-plane-namespace` | `traefik-gateway-operator-system` | Default namespace for `Dedicated`-mode data planes. |
 | `-metrics-bind-address` | `:8080` | Operator metrics endpoint. |
 | `-health-probe-bind-address` | `:8081` | Liveness and readiness probes. |
 | `-leader-elect` | `false` | Enable leader election. |
