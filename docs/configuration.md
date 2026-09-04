@@ -98,17 +98,14 @@ Provisioned instances are started with:
 ```
 --providers.kubernetesGateway=true
 --providers.kubernetesGateway.gateway=<namespace>/<name>[,<namespace>/<name>...]
---providers.kubernetesGateway.disableGatewayClassStatus=true
 --providers.kubernetesGateway.experimentalChannel=true
 --providers.kubernetesGateway.statusAddress.service.name=<provisioned service>
 --providers.kubernetesGateway.statusAddress.service.namespace=<its namespace>
 ```
 
-The `gateway` (scoping) and `disableGatewayClassStatus` options are required in
-the Traefik image. They ensure a data plane only reconciles the Gateways it was
-provisioned for, and that the operator remains the single writer of the
-GatewayClass status while the data plane owns Gateway, listener and route
-status.
+The `gateway` (scoping) option is required in the Traefik image. It ensures a
+data plane only reconciles the Gateways it was provisioned for, while the data
+plane owns Gateway, listener and route status.
 
 ## Data plane RBAC
 

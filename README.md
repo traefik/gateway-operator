@@ -80,8 +80,8 @@ Single status writer per resource, no fights:
   API servers).
 - [Gateway API v1.5.1](https://github.com/kubernetes-sigs/gateway-api/releases/tag/v1.5.1)
   CRDs (experimental channel for TLSRoute/TCPRoute support).
-- A Traefik image carrying the `kubernetesGateway` provider options
-  `gateway` and `disableGatewayClassStatus` (see
+- A Traefik image carrying the `kubernetesGateway` provider option
+  `gateway` (see
   [Data plane requirements](docs/configuration.md#data-plane-requirements)).
 
 ## Quick start
