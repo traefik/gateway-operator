@@ -7,7 +7,7 @@ v1.5.1.
 ## Results
 
 GATEWAY-HTTP profile, kind (Kubernetes 1.36) with MetalLB, Traefik data plane
-built with the `gateway` and `disableGatewayClassStatus` provider options. The
+built with the `gateway` provider option. The
 generated report is committed at
 [`conformance/reports/v1.5.1/experimental-dev-default-report.yaml`](../conformance/reports/v1.5.1/experimental-dev-default-report.yaml):
 
