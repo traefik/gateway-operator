@@ -262,9 +262,11 @@ func infraAnnotations(gw *gwapiv1.Gateway) map[string]string {
 }
 
 // containerArgs builds the data plane Traefik arguments. The kubernetesGateway
-// provider is scoped to the data plane's Gateway(s) and reports the address of
-// the Service the operator provisioned for it. The data plane writes its own
-// Gateway, listener and route status. See DESIGN.md section 8.
+// provider is scoped to the data plane's Gateway(s), reports the address of the
+// Service the operator provisioned for it, and writes its own Gateway, listener
+// and route status. The operator only writes the Gateway status when a static
+// address is rejected for an unsupported type (in which case no data plane
+// runs); otherwise the data plane owns it. See DESIGN.md section 8.
 func containerArgs(p buildParams) []string {
 	proxy := p.proxy
 	args := []string{

@@ -119,3 +119,21 @@ func TestRender_NoPassthrough(t *testing.T) {
 		t.Fatal("did not expect a log level arg")
 	}
 }
+
+func TestRender_ReportsServiceAddress(t *testing.T) {
+	gw := mkGateway("app", "gw", listener("http", 80, gwapiv1.HTTPProtocolType, ""))
+	set := Render(gw, nil, "app")
+
+	// The data plane reports the address of its own Service, so it owns the
+	// Gateway status.addresses in the normal case.
+	name := ResourceName(gw)
+	args := set.Deployment.Spec.Template.Spec.Containers[0].Args
+	for _, want := range []string{
+		"--providers.kubernetesGateway.statusAddress.service.name=" + name,
+		"--providers.kubernetesGateway.statusAddress.service.namespace=app",
+	} {
+		if !hasArg(args, want) {
+			t.Fatalf("expected data plane arg %q, got %v", want, args)
+		}
+	}
+}
