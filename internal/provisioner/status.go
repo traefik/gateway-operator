@@ -102,7 +102,7 @@ func StaticAddressStatus(gw *gwapiv1.Gateway, realized []gwapiv1.GatewayStatusAd
 		if a.Type != nil {
 			t = *a.Type
 		}
-		matched = append(matched, gwapiv1.GatewayStatusAddress{Type: ptr.To(t), Value: a.Value})
+		matched = append(matched, gwapiv1.GatewayStatusAddress{Type: new(t), Value: a.Value})
 	}
 
 	if allUsable {

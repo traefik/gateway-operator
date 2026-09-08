@@ -76,55 +76,57 @@ func specIP(v string) gwapiv1.GatewaySpecAddress {
 	return gwapiv1.GatewaySpecAddress{Type: ptr.To(gwapiv1.IPAddressType), Value: v}
 }
 
-func TestStaticAddressStatus(t *testing.T) {
+func TestStaticAddressStatus_NoSpecAddresses(t *testing.T) {
 	realized := []gwapiv1.GatewayStatusAddress{{Type: ptr.To(gwapiv1.IPAddressType), Value: "1.2.3.4"}}
 
-	t.Run("no spec addresses provisions and publishes nothing", func(t *testing.T) {
-		addrs, conds, provision := StaticAddressStatus(&gwapiv1.Gateway{}, realized)
-		if !provision {
-			t.Fatal("expected to provision")
-		}
-		if addrs != nil || conds != nil {
-			t.Fatalf("expected the operator to publish nothing, got addrs=%+v conds=%+v", addrs, conds)
-		}
-	})
+	addrs, conds, provision := StaticAddressStatus(&gwapiv1.Gateway{}, realized)
+	if !provision {
+		t.Fatal("expected to provision")
+	}
+	if addrs != nil || conds != nil {
+		t.Fatalf("expected the operator to publish nothing, got addrs=%+v conds=%+v", addrs, conds)
+	}
+}
 
-	t.Run("all requested addresses realized provisions and publishes nothing", func(t *testing.T) {
-		addrs, conds, provision := StaticAddressStatus(gwWithAddresses(specIP("1.2.3.4")), realized)
-		if !provision {
-			t.Fatal("expected to provision")
-		}
-		if addrs != nil || conds != nil {
-			t.Fatalf("expected the operator to publish nothing, got addrs=%+v conds=%+v", addrs, conds)
-		}
-	})
+func TestStaticAddressStatus_AllRealized(t *testing.T) {
+	realized := []gwapiv1.GatewayStatusAddress{{Type: ptr.To(gwapiv1.IPAddressType), Value: "1.2.3.4"}}
 
-	t.Run("unrealized address does not provision and reports AddressNotUsable", func(t *testing.T) {
-		gw := gwWithAddresses(specIP("9.9.9.9"), specIP("1.2.3.4"))
-		addrs, conds, provision := StaticAddressStatus(gw, realized)
-		if provision {
-			t.Fatal("expected not to provision")
-		}
-		// Only the realized subset is reported.
-		if len(addrs) != 1 || addrs[0].Value != "1.2.3.4" {
-			t.Fatalf("expected only the realized address, got %+v", addrs)
-		}
-		accepted := findCond(conds, gwapiv1.GatewayConditionAccepted)
-		if accepted == nil || accepted.Status != metav1.ConditionTrue {
-			t.Fatalf("expected Accepted=True, got %+v", conds)
-		}
-		programmed := findCond(conds, gwapiv1.GatewayConditionProgrammed)
-		if programmed == nil || programmed.Status != metav1.ConditionFalse || programmed.Reason != string(gwapiv1.GatewayReasonAddressNotUsable) {
-			t.Fatalf("expected Programmed=False/AddressNotUsable, got %+v", conds)
-		}
-	})
+	addrs, conds, provision := StaticAddressStatus(gwWithAddresses(specIP("1.2.3.4")), realized)
+	if !provision {
+		t.Fatal("expected to provision")
+	}
+	if addrs != nil || conds != nil {
+		t.Fatalf("expected the operator to publish nothing, got addrs=%+v conds=%+v", addrs, conds)
+	}
+}
 
-	t.Run("no realized address does not provision", func(t *testing.T) {
-		_, _, provision := StaticAddressStatus(gwWithAddresses(specIP("1.2.3.4")), nil)
-		if provision {
-			t.Fatal("expected not to provision without a realized address")
-		}
-	})
+func TestStaticAddressStatus_UnrealizedAddress(t *testing.T) {
+	realized := []gwapiv1.GatewayStatusAddress{{Type: ptr.To(gwapiv1.IPAddressType), Value: "1.2.3.4"}}
+
+	gw := gwWithAddresses(specIP("9.9.9.9"), specIP("1.2.3.4"))
+	addrs, conds, provision := StaticAddressStatus(gw, realized)
+	if provision {
+		t.Fatal("expected not to provision")
+	}
+	// Only the realized subset is reported.
+	if len(addrs) != 1 || addrs[0].Value != "1.2.3.4" {
+		t.Fatalf("expected only the realized address, got %+v", addrs)
+	}
+	accepted := findCond(conds, gwapiv1.GatewayConditionAccepted)
+	if accepted == nil || accepted.Status != metav1.ConditionTrue {
+		t.Fatalf("expected Accepted=True, got %+v", conds)
+	}
+	programmed := findCond(conds, gwapiv1.GatewayConditionProgrammed)
+	if programmed == nil || programmed.Status != metav1.ConditionFalse || programmed.Reason != string(gwapiv1.GatewayReasonAddressNotUsable) {
+		t.Fatalf("expected Programmed=False/AddressNotUsable, got %+v", conds)
+	}
+}
+
+func TestStaticAddressStatus_NoRealizedAddress(t *testing.T) {
+	_, _, provision := StaticAddressStatus(gwWithAddresses(specIP("1.2.3.4")), nil)
+	if provision {
+		t.Fatal("expected not to provision without a realized address")
+	}
 }
 
 func TestRealizedAddresses(t *testing.T) {

@@ -104,42 +104,48 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
+	return ctrl.Result{}, r.provisionGateway(ctx, &gw, proxy)
+}
+
+// provisionGateway renders and applies the data plane for a managed, live
+// Gateway, and reconciles the static-address portion of its status.
+func (r *GatewayReconciler) provisionGateway(ctx context.Context, gw *gwapiv1.Gateway, proxy *v1alpha1.TraefikProxy) error {
 	// A Gateway that requests an unsupported static address type is rejected up
 	// front: the configuration can never be satisfied, so no data plane may run
 	// with it. Any previously provisioned data plane is torn down (the finalizer
 	// is kept for the cluster-scoped binding) and the operator publishes the
 	// Gateway status itself, since no data plane is left to write it. This is
 	// decided from the spec alone, so it needs no Service.
-	if conds := provisioner.StaticAddressRejection(&gw); conds != nil {
-		if err := r.cleanup(ctx, &gw, gw.Namespace); err != nil {
-			return ctrl.Result{}, err
+	if conds := provisioner.StaticAddressRejection(gw); conds != nil {
+		if err := r.cleanup(ctx, gw, gw.Namespace); err != nil {
+			return err
 		}
 		// Nil addresses clear anything a torn-down data plane left behind.
-		return ctrl.Result{}, r.writeGatewayStatus(ctx, &gw, nil, conds)
+		return r.writeGatewayStatus(ctx, gw, nil, conds)
 	}
 
-	set := provisioner.Render(&gw, proxy, gw.Namespace)
+	set := provisioner.Render(gw, proxy, gw.Namespace)
 
 	// The Service is provisioned first: it is what an external load balancer
 	// assigns an address to, and observing which requested static addresses it
 	// realized decides whether the data plane may run.
-	if err := r.applyInfra(ctx, &gw, set); err != nil {
-		return ctrl.Result{}, err
+	if err := r.applyInfra(ctx, gw, set); err != nil {
+		return err
 	}
 
 	var svc corev1.Service
 	if err := r.Get(ctx, types.NamespacedName{Namespace: set.Service.Namespace, Name: set.Service.Name}, &svc); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		return client.IgnoreNotFound(err)
 	}
 
-	addrs, conds, provision := provisioner.StaticAddressStatus(&gw, provisioner.RealizedAddresses(&svc))
+	addrs, conds, provision := provisioner.StaticAddressStatus(gw, provisioner.RealizedAddresses(&svc))
 	if !provision {
 		// A requested static address is not usable: no data plane runs, and the
 		// operator publishes the address status itself.
 		if err := r.deleteDataPlane(ctx, set); err != nil {
-			return ctrl.Result{}, err
+			return err
 		}
-		return ctrl.Result{}, r.writeGatewayStatus(ctx, &gw, addrs, conds)
+		return r.writeGatewayStatus(ctx, gw, addrs, conds)
 	}
 
 	// Addresses are usable, or none were requested: run the data plane and let
@@ -147,7 +153,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// status the operator published earlier, so there is nothing to release: the
 	// operator simply stops writing the status. Until the data plane comes up,
 	// the operator's last conditions stay in place at the current generation.
-	return ctrl.Result{}, r.applyDataPlane(ctx, &gw, set)
+	return r.applyDataPlane(ctx, gw, set)
 }
 
 // writeGatewayStatus server-side applies the Gateway status the operator owns
