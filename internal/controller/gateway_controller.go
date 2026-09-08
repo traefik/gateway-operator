@@ -10,7 +10,10 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -43,6 +46,7 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways/finalizers,verbs=update
 // Read-only on GatewayClass: resolving the class a Gateway references and its
 // parametersRef. Its status belongs to the data plane.
@@ -58,9 +62,11 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,verbs=get;list;watch;bind
 
 // Reconcile provisions the data plane for a Gateway. The provisioned data plane
-// (the in-tree kubernetesGateway provider, scoped to this Gateway) is the single
-// writer of Gateway, listener and route status; the operator only provisions
-// infrastructure.
+// (the in-tree kubernetesGateway provider, scoped to this Gateway) writes the
+// Gateway, listener and route status, including addresses. The operator only
+// writes the Gateway status when a static address is rejected for an
+// unsupported type: in that case no data plane is provisioned and the operator
+// is the sole status writer.
 func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var gw gwapiv1.Gateway
 	if err := r.Get(ctx, req.NamespacedName, &gw); err != nil {
@@ -98,11 +104,108 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
+	// A Gateway that requests an unsupported static address type is rejected up
+	// front: the configuration can never be satisfied, so no data plane may run
+	// with it. Any previously provisioned data plane is torn down (the finalizer
+	// is kept for the cluster-scoped binding) and the operator publishes the
+	// Gateway status itself, since no data plane is left to write it. This is
+	// decided from the spec alone, so it needs no Service.
+	if conds := provisioner.StaticAddressRejection(&gw); conds != nil {
+		if err := r.cleanup(ctx, &gw, gw.Namespace); err != nil {
+			return ctrl.Result{}, err
+		}
+		// Nil addresses clear anything a torn-down data plane left behind.
+		return ctrl.Result{}, r.writeGatewayStatus(ctx, &gw, nil, conds)
+	}
+
 	set := provisioner.Render(&gw, proxy, gw.Namespace)
-	if err := r.applySet(ctx, &gw, set); err != nil {
+
+	// The Service is provisioned first: it is what an external load balancer
+	// assigns an address to, and observing which requested static addresses it
+	// realized decides whether the data plane may run.
+	if err := r.applyInfra(ctx, &gw, set); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{}, nil
+
+	var svc corev1.Service
+	if err := r.Get(ctx, types.NamespacedName{Namespace: set.Service.Namespace, Name: set.Service.Name}, &svc); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	addrs, conds, provision := provisioner.StaticAddressStatus(&gw, provisioner.RealizedAddresses(&svc))
+	if !provision {
+		// A requested static address is not usable: no data plane runs, and the
+		// operator publishes the address status itself.
+		if err := r.deleteDataPlane(ctx, set); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, r.writeGatewayStatus(ctx, &gw, addrs, conds)
+	}
+
+	// Addresses are usable, or none were requested: run the data plane and let
+	// it own the Gateway status. Its full status update overwrites any error
+	// status the operator published earlier, so there is nothing to release: the
+	// operator simply stops writing the status. Until the data plane comes up,
+	// the operator's last conditions stay in place at the current generation.
+	return ctrl.Result{}, r.applyDataPlane(ctx, &gw, set)
+}
+
+// writeGatewayStatus server-side applies the Gateway status the operator owns
+// while it handles a static-address error, as no data plane runs to write it:
+// the addresses to publish and the Accepted/Programmed conditions. status.
+// addresses is always asserted (an explicit empty list clears anything a
+// torn-down data plane left; the typed field is omitempty and a nil would leave
+// the stale value).
+func (r *GatewayReconciler) writeGatewayStatus(ctx context.Context, gw *gwapiv1.Gateway, addrs []gwapiv1.GatewayStatusAddress, conds []metav1.Condition) error {
+	addrItems := make([]any, 0, len(addrs))
+	for i := range addrs {
+		m, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&addrs[i])
+		if err != nil {
+			return err
+		}
+		addrItems = append(addrItems, m)
+	}
+
+	// Preserve the transition time when a condition's status is unchanged to
+	// avoid rewriting the Gateway on every reconcile.
+	condItems := make([]any, 0, len(conds))
+	for i := range conds {
+		if existing := apimeta.FindStatusCondition(gw.Status.Conditions, conds[i].Type); existing != nil && existing.Status == conds[i].Status {
+			conds[i].LastTransitionTime = existing.LastTransitionTime
+		} else {
+			conds[i].LastTransitionTime = metav1.Now()
+		}
+		m, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&conds[i])
+		if err != nil {
+			return err
+		}
+		condItems = append(condItems, m)
+	}
+
+	return r.applyGatewayStatus(ctx, gw, map[string]any{
+		"addresses":  addrItems,
+		"conditions": condItems,
+	})
+}
+
+// applyGatewayStatus server-side applies the given Gateway status fields under
+// the operator's field manager. Fields absent from status are released by the
+// operator, so the data plane can own everything the operator does not set.
+func (r *GatewayReconciler) applyGatewayStatus(ctx context.Context, gw *gwapiv1.Gateway, status map[string]any) error {
+	gvk, err := apiutil.GVKForObject(&gwapiv1.Gateway{}, r.Scheme())
+	if err != nil {
+		return err
+	}
+	apply := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": gvk.GroupVersion().String(),
+		"kind":       gvk.Kind,
+		"metadata": map[string]any{
+			"name":      gw.Name,
+			"namespace": gw.Namespace,
+		},
+		"status": status,
+	}}
+	return r.Status().Patch(ctx, apply, client.Apply, client.FieldOwner(fieldManager), client.ForceOwnership)
 }
 
 // finalize deletes the data plane's cluster-scoped ClusterRoleBinding (the only
@@ -174,9 +277,22 @@ func (r *GatewayReconciler) resolveProxy(ctx context.Context, gw *gwapiv1.Gatewa
 // fields it manages.
 const fieldManager = "traefik-gateway-operator"
 
-func (r *GatewayReconciler) applySet(ctx context.Context, gw *gwapiv1.Gateway, set *provisioner.ResourceSet) error {
-	// The data plane lives in the Gateway's own namespace, so every namespaced
-	// resource carries an owner reference to the Gateway for garbage collection.
+// applyInfra provisions the Gateway's Service. It is applied before the data
+// plane so an external load balancer can assign it an address, which decides
+// whether the data plane may run (see provisioner.StaticAddressStatus). The
+// Service carries an owner reference to the Gateway for garbage collection.
+func (r *GatewayReconciler) applyInfra(ctx context.Context, gw *gwapiv1.Gateway, set *provisioner.ResourceSet) error {
+	if err := r.apply(ctx, gw, set.Service, true); err != nil {
+		return fmt.Errorf("service: %w", err)
+	}
+	return nil
+}
+
+// applyDataPlane provisions the data plane that runs Traefik: its
+// ServiceAccount and cluster-scoped binding, the Deployment, and the optional
+// PodDisruptionBudget and HorizontalPodAutoscaler. Every namespaced resource
+// carries an owner reference to the Gateway for garbage collection.
+func (r *GatewayReconciler) applyDataPlane(ctx context.Context, gw *gwapiv1.Gateway, set *provisioner.ResourceSet) error {
 	if err := r.apply(ctx, gw, set.ServiceAccount, true); err != nil {
 		return fmt.Errorf("serviceaccount: %w", err)
 	}
@@ -187,9 +303,6 @@ func (r *GatewayReconciler) applySet(ctx context.Context, gw *gwapiv1.Gateway, s
 	}
 	if err := r.apply(ctx, gw, set.Deployment, true); err != nil {
 		return fmt.Errorf("deployment: %w", err)
-	}
-	if err := r.apply(ctx, gw, set.Service, true); err != nil {
-		return fmt.Errorf("service: %w", err)
 	}
 
 	om := metav1.ObjectMeta{Name: set.Service.Name, Namespace: set.Service.Namespace}
@@ -210,6 +323,27 @@ func (r *GatewayReconciler) applySet(ctx context.Context, gw *gwapiv1.Gateway, s
 		return fmt.Errorf("horizontalpodautoscaler: %w", err)
 	}
 
+	return nil
+}
+
+// deleteDataPlane removes the data plane that runs Traefik while keeping the
+// Service, so a Gateway whose static addresses cannot be honored runs no
+// Traefik yet still exposes the Service an address is assigned to.
+func (r *GatewayReconciler) deleteDataPlane(ctx context.Context, set *provisioner.ResourceSet) error {
+	name := set.Service.Name
+	om := metav1.ObjectMeta{Name: name, Namespace: set.Service.Namespace}
+	for _, obj := range []client.Object{
+		&appsv1.Deployment{ObjectMeta: om},
+		&policyv1.PodDisruptionBudget{ObjectMeta: om},
+		&autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: om},
+		&corev1.ServiceAccount{ObjectMeta: om},
+		// Cluster-scoped, named the same, no namespace.
+		&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: name}},
+	} {
+		if err := r.deleteIfExists(ctx, obj); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

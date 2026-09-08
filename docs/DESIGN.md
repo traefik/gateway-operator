@@ -41,10 +41,12 @@ created. This document designs the equivalent for Traefik.
 
 1. Provision a Traefik data plane (Deployment or DaemonSet, Service,
    ServiceAccount) per Gateway.
-2. Populate each Gateway `status.addresses` from the Service the operator
-   created for that Gateway, and gate the `Programmed` condition on the real
-   data plane readiness.
-3. Honor `spec.addresses` (static addresses) on the provisioned Service.
+2. Populate each Gateway `status.addresses` from the Service provisioned for
+   that Gateway. The data plane does this through its `statusAddress.service`
+   option; the operator does not.
+3. Honor `spec.addresses` (static addresses) on the provisioned Service, and
+   reject a Gateway that requests an unsupported address type before any data
+   plane runs.
 4. Propagate `spec.infrastructure.labels` and `spec.infrastructure.annotations`
    onto the generated resources.
 5. Expose data plane configuration through a `TraefikProxy` CRD referenced from
@@ -89,7 +91,10 @@ Status ownership is split so that each resource has a single writer:
   set spanning the operator and the data plane),
 - the provisioned data plane writes the Gateway, listener and route status it
   already computes, and reports the address of the Service the operator created
-  for it (through the provider statusAddress.service option).
+  for it (through the provider `statusAddress.service` option),
+- the operator takes over the Gateway status only to reject a Gateway that
+  requests an unsupported static address type, in which case no data plane runs
+  to write it (see section 4.4).
 
 ## 4. Components
 
@@ -139,20 +144,35 @@ Gateway and is reclaimed by a finalizer plus explicit cleanup (see 6).
 
 ### 4.4 Status ownership
 
-The initial design placed a status manager in the operator, mirroring Envoy
-Gateway `UpdateGatewayStatusProgrammedCondition`. Conformance testing showed
-that approach duplicates, and stubs, the rich per-listener status the in-tree
-provider already computes (attached routes, resolved references, supported
-kinds, conflicts). The design was revised: the data plane is the single writer
-of Gateway, listener and route status, and the operator only writes the
-GatewayClass status.
+The initial design placed a full status manager in the operator, mirroring
+Envoy Gateway `UpdateGatewayStatusProgrammedCondition`. Conformance testing
+showed that approach duplicates, and stubs, the rich per-listener status the
+in-tree provider already computes (attached routes, resolved references,
+supported kinds, conflicts). The design was revised: the data plane writes the
+Gateway, listener and route status it already computes, including
+`status.addresses` (from its `statusAddress.service` option pointed at the
+Service the operator provisioned). The operator does not write the Gateway
+status in the normal case.
 
-To make that possible the provider honors `spec.addresses` itself: requests
-with an unsupported address type are rejected with
-`Accepted=False/UnsupportedAddress`; requested addresses are only reported once
-actually realized by the Service the operator provisioned (the operator renders
-them as `externalIPs`/`loadBalancerIP`), and unrealized requests keep the
-Gateway `Programmed=False/AddressNotUsable`.
+The one case the operator takes over is a Gateway that requests an unsupported
+static address type. This is a hard spec error decided from the Gateway alone:
+the requested configuration can never be satisfied, so no data plane may run
+with it. The operator therefore does not provision the data plane (and tears
+down any previously provisioned one, keeping the finalizer), and — because no
+data plane is left to write the status — publishes it itself:
+`Accepted=False/UnsupportedAddress` and `Programmed=False/Invalid`.
+
+That write is a server-side apply under the operator's field manager, carrying
+those conditions and an empty `status.addresses` (an explicit empty list clears
+any addresses the torn-down data plane left behind). Once the spec is corrected,
+the operator provisions the data plane again and applies an empty status under
+its field manager, releasing every field it owned so the data plane resumes
+ownership of the Gateway status.
+
+A requested static address is still rendered onto the Service as
+`externalIPs`/`loadBalancerIP` (section 4.3). Whether it is actually realized,
+and the resulting `Programmed`/`AddressNotUsable` gating, is left entirely to
+the data plane's `statusAddress` handling — the operator does not duplicate it.
 
 ### 4.5 TraefikProxy config resolver
 
@@ -229,8 +249,10 @@ binding explicitly when the Gateway is deleted.
 ```mermaid
 flowchart TD
     ev(["Gateway event"]) --> resolve["Resolve TraefikProxy config<br/>(GatewayClass parametersRef)"]
-    resolve --> render["Render resource set:<br/>ServiceAccount, Deployment, Service,<br/>optional HPA, PDB, ClusterRoleBinding.<br/>Inject gateway-name label and<br/>spec.infrastructure labels and annotations.<br/>Owner references, plus a finalizer for<br/>the cluster-scoped ClusterRoleBinding."]
-    render --> apply["Server-side apply the resource set"]
+    resolve --> reject{"Unsupported static<br/>address type?"}
+    reject -- yes --> teardown["Tear down any data plane<br/>and publish Gateway<br/>Accepted=False/UnsupportedAddress"]
+    reject -- no --> render["Render resource set:<br/>ServiceAccount, Deployment, Service,<br/>optional HPA, PDB, ClusterRoleBinding.<br/>Inject gateway-name label and<br/>spec.infrastructure labels and annotations.<br/>Owner references, plus a finalizer for<br/>the cluster-scoped ClusterRoleBinding."]
+    render --> apply["Server-side apply the resource set,<br/>then release any operator-owned status"]
     apply --> dpstatus["Data plane starts, scoped to the Gateway,<br/>and writes Gateway, listener and route status<br/>(addresses from its own Service)"]
 ```
 
@@ -238,20 +260,21 @@ flowchart TD
 
 The provisioned Traefik instances run the existing
 `pkg/provider/kubernetes/gateway` provider to translate routes attached to their
-Gateway into dynamic configuration. Two provider options make this work, both
+Gateway into dynamic configuration. One provider option makes this work,
 implemented in the in-tree provider:
 
 1. `--providers.kubernetesGateway.gateway=<namespace>/<name>` scopes a data
    plane instance to the single Gateway it was provisioned for, instead of all
    Gateways in the cluster. Without this, every provisioned instance would try
    to serve every Gateway.
-2. `--providers.kubernetesGateway.disableGatewayStatus=true` stops the data
-   plane from writing Gateway and GatewayClass status, so the operator is the
-   single status writer. Route status is still written by the data plane, which
-   is the component that actually routes.
 
-The operator does not duplicate routing logic. This keeps the routing
-conformance surface (the bulk of the features) in one place.
+The data plane is given a `statusAddress.service` option pointing at the Service
+the operator provisioned, so it reports that Service's address as the Gateway
+`status.addresses` and writes the Gateway, listener and route status it
+computes. The operator only takes over the Gateway status to reject an
+unsupported static address type, when no data plane runs (section 4.4). The
+operator does not duplicate routing logic, which keeps the routing conformance
+surface (the bulk of the features) in one place.
 
 ## 9. Feature coverage matrix
 

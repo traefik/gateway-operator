@@ -6,15 +6,19 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -172,6 +176,176 @@ func TestReconcile_AutoscalingAndPDBLifecycle(t *testing.T) {
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app", Name: name}, &policyv1.PodDisruptionBudget{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("expected PDB removed, got %v", err)
 	}
+}
+
+func TestReconcile_UnsupportedStaticAddressNotProvisioned(t *testing.T) {
+	s := testScheme(t)
+	gc := gatewayClass("traefik", nil)
+	gw := testGateway("app", "gw", "traefik")
+	gw.Spec.Addresses = []gwapiv1.GatewaySpecAddress{{
+		Type: ptr.To(gwapiv1.AddressType("test/fake")), Value: "x",
+	}}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(gc, gw).
+		WithStatusSubresource(&gwapiv1.Gateway{}, &corev1.Service{}).
+		Build()
+
+	r := &GatewayReconciler{Client: cl}
+	reconcile(t, r, gw)
+
+	// The data plane must not be provisioned for a rejected Gateway.
+	err := cl.Get(context.Background(), types.NamespacedName{Namespace: "app", Name: provisioner.ResourceName(gw)}, &appsv1.Deployment{})
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected no deployment for a rejected gateway, got %v", err)
+	}
+
+	got := getGateway(t, cl, "app", "gw")
+	accepted := apimeta.FindStatusCondition(got.Status.Conditions, string(gwapiv1.GatewayConditionAccepted))
+	if accepted == nil || accepted.Status != metav1.ConditionFalse || accepted.Reason != string(gwapiv1.GatewayReasonUnsupportedAddress) {
+		t.Fatalf("expected Accepted=False/UnsupportedAddress, got %+v", got.Status.Conditions)
+	}
+	programmed := apimeta.FindStatusCondition(got.Status.Conditions, string(gwapiv1.GatewayConditionProgrammed))
+	if programmed == nil || programmed.Status != metav1.ConditionFalse {
+		t.Fatalf("expected Programmed=False, got %+v", got.Status.Conditions)
+	}
+}
+
+func TestReconcile_RejectedStaticAddressTearsDownDataPlane(t *testing.T) {
+	s := testScheme(t)
+	gc := gatewayClass("traefik", nil)
+	gw := testGateway("app", "gw", "traefik")
+
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(gc, gw).
+		WithStatusSubresource(&gwapiv1.Gateway{}, &corev1.Service{}).
+		Build()
+
+	r := &GatewayReconciler{Client: cl}
+	ctx := context.Background()
+	name := provisioner.ResourceName(gw)
+
+	// First reconcile with a valid spec provisions the data plane.
+	reconcile(t, r, gw)
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app", Name: name}, &appsv1.Deployment{}); err != nil {
+		t.Fatalf("expected deployment to be provisioned: %v", err)
+	}
+
+	// The spec then requests an unsupported address type.
+	got := getGateway(t, cl, "app", "gw")
+	got.Spec.Addresses = []gwapiv1.GatewaySpecAddress{{
+		Type: ptr.To(gwapiv1.AddressType("test/fake")), Value: "x",
+	}}
+	if err := cl.Update(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	reconcile(t, r, gw)
+
+	// The data plane is torn down.
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app", Name: name}, &appsv1.Deployment{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected deployment torn down after rejection, got %v", err)
+	}
+	if err := cl.Get(ctx, types.NamespacedName{Name: name}, &rbacv1.ClusterRoleBinding{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected clusterrolebinding torn down after rejection, got %v", err)
+	}
+}
+
+func TestReconcile_UnusableStaticAddress(t *testing.T) {
+	s := testScheme(t)
+	gc := gatewayClass("traefik", nil)
+	gw := testGateway("app", "gw", "traefik")
+	gw.Spec.Addresses = []gwapiv1.GatewaySpecAddress{{
+		Type: ptr.To(gwapiv1.IPAddressType), Value: "203.0.113.5",
+	}}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(gc, gw).
+		WithStatusSubresource(&gwapiv1.Gateway{}, &corev1.Service{}).
+		Build()
+
+	r := &GatewayReconciler{Client: cl}
+	ctx := context.Background()
+	name := provisioner.ResourceName(gw)
+
+	reconcile(t, r, gw)
+
+	// The Service is provisioned (it is what an address is assigned to) but the
+	// data plane is not, because the requested address is not realized.
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app", Name: name}, &corev1.Service{}); err != nil {
+		t.Fatalf("expected the service to be provisioned: %v", err)
+	}
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app", Name: name}, &appsv1.Deployment{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected no deployment for an unusable address, got %v", err)
+	}
+
+	got := getGateway(t, cl, "app", "gw")
+	accepted := apimeta.FindStatusCondition(got.Status.Conditions, string(gwapiv1.GatewayConditionAccepted))
+	if accepted == nil || accepted.Status != metav1.ConditionTrue {
+		t.Fatalf("expected Accepted=True, got %+v", got.Status.Conditions)
+	}
+	programmed := apimeta.FindStatusCondition(got.Status.Conditions, string(gwapiv1.GatewayConditionProgrammed))
+	if programmed == nil || programmed.Status != metav1.ConditionFalse || programmed.Reason != string(gwapiv1.GatewayReasonAddressNotUsable) {
+		t.Fatalf("expected Programmed=False/AddressNotUsable, got %+v", got.Status.Conditions)
+	}
+}
+
+func TestReconcile_UsableStaticAddressProvisions(t *testing.T) {
+	s := testScheme(t)
+	gc := gatewayClass("traefik", nil)
+	gw := testGateway("app", "gw", "traefik")
+	gw.Spec.Addresses = []gwapiv1.GatewaySpecAddress{{
+		Type: ptr.To(gwapiv1.IPAddressType), Value: "203.0.113.5",
+	}}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(gc, gw).
+		WithStatusSubresource(&gwapiv1.Gateway{}, &corev1.Service{}).
+		Build()
+
+	r := &GatewayReconciler{Client: cl}
+	ctx := context.Background()
+	name := provisioner.ResourceName(gw)
+
+	// The address is not realized yet, so no data plane runs.
+	reconcile(t, r, gw)
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app", Name: name}, &appsv1.Deployment{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected no deployment before the address is realized, got %v", err)
+	}
+
+	// The load balancer assigns the requested address to the Service.
+	setServiceIngress(t, cl, "app", name, "203.0.113.5")
+	reconcile(t, r, gw)
+
+	// The data plane is provisioned once the address is realized, and the
+	// operator releases the Gateway status back to it without error.
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app", Name: name}, &appsv1.Deployment{}); err != nil {
+		t.Fatalf("expected deployment once the address is realized: %v", err)
+	}
+}
+
+func setServiceIngress(t *testing.T, cl client.Client, ns, name, ip string) {
+	t.Helper()
+	var svc corev1.Service
+	if err := cl.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: name}, &svc); err != nil {
+		t.Fatalf("getting service: %v", err)
+	}
+	svc.Status.LoadBalancer.Ingress = []corev1.LoadBalancerIngress{{IP: ip}}
+	if err := cl.Status().Update(context.Background(), &svc); err != nil {
+		t.Fatalf("updating service status: %v", err)
+	}
+}
+
+func getGateway(t *testing.T, cl client.Client, ns, name string) *gwapiv1.Gateway {
+	t.Helper()
+	var gw gwapiv1.Gateway
+	if err := cl.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: name}, &gw); err != nil {
+		t.Fatal(err)
+	}
+	return &gw
 }
 
 func testScheme(t *testing.T) *runtime.Scheme {
