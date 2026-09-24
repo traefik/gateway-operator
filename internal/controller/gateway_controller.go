@@ -13,12 +13,15 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/traefik/gateway-operator/api/v1alpha1"
@@ -42,7 +45,32 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ServiceAccount{}).
+		// A ListenerSet adds its listener ports to the data plane of its Gateway.
+		Watches(&gwapiv1.ListenerSet{}, handler.EnqueueRequestsFromMapFunc(listenerSetGateway)).
 		Complete(r)
+}
+
+// listenerSetGateway enqueues the Gateway a ListenerSet references.
+func listenerSetGateway(_ context.Context, obj client.Object) []ctrl.Request {
+	ls, ok := obj.(*gwapiv1.ListenerSet)
+	if !ok || !isGatewayRef(ls.Spec.ParentRef) {
+		return nil
+	}
+	return []ctrl.Request{{NamespacedName: listenerSetParent(ls)}}
+}
+
+// listenerSetParent returns the Gateway a ListenerSet references, which
+// defaults to the ListenerSet namespace.
+func listenerSetParent(ls *gwapiv1.ListenerSet) types.NamespacedName {
+	return types.NamespacedName{
+		Namespace: string(ptr.Deref(ls.Spec.ParentRef.Namespace, gwapiv1.Namespace(ls.Namespace))),
+		Name:      string(ls.Spec.ParentRef.Name),
+	}
+}
+
+func isGatewayRef(ref gwapiv1.ParentGatewayReference) bool {
+	return ptr.Deref(ref.Group, gwapiv1.GroupName) == gwapiv1.GroupName &&
+		ptr.Deref(ref.Kind, "Gateway") == "Gateway"
 }
 
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch;update;patch
@@ -52,6 +80,10 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // parametersRef. Its status belongs to the data plane.
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gatewayclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=gateway.traefik.io,resources=traefikproxies,verbs=get;list;watch
+// Read-only on ListenerSets, whose listener ports the data plane exposes, and on
+// Namespaces, to evaluate a Gateway allowedListeners namespace selector.
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=listenersets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
@@ -124,7 +156,12 @@ func (r *GatewayReconciler) provisionGateway(ctx context.Context, gw *gwapiv1.Ga
 		return r.writeGatewayStatus(ctx, gw, nil, conds)
 	}
 
-	set := provisioner.Render(gw, proxy, gw.Namespace)
+	listenerSets, err := r.attachedListenerSets(ctx, gw)
+	if err != nil {
+		return err
+	}
+
+	set := provisioner.Render(gw, listenerSets, proxy, gw.Namespace)
 
 	// The Service is provisioned first: it is what an external load balancer
 	// assigns an address to, and observing which requested static addresses it
@@ -258,6 +295,67 @@ func (r *GatewayReconciler) ownsGateway(ctx context.Context, gw *gwapiv1.Gateway
 		return false, client.IgnoreNotFound(err)
 	}
 	return gc.Spec.ControllerName == provisioner.ControllerName, nil
+}
+
+// attachedListenerSets returns the ListenerSets referencing the Gateway and
+// allowed by its allowedListeners, which defaults to none.
+func (r *GatewayReconciler) attachedListenerSets(ctx context.Context, gw *gwapiv1.Gateway) ([]gwapiv1.ListenerSet, error) {
+	if gw.Spec.AllowedListeners == nil || gw.Spec.AllowedListeners.Namespaces == nil {
+		return nil, nil
+	}
+	allowed := gw.Spec.AllowedListeners.Namespaces
+	from := ptr.Deref(allowed.From, gwapiv1.NamespacesFromNone)
+	if from == gwapiv1.NamespacesFromNone {
+		return nil, nil
+	}
+
+	var selector labels.Selector
+	if from == gwapiv1.NamespacesFromSelector {
+		var err error
+		if selector, err = metav1.LabelSelectorAsSelector(allowed.Selector); err != nil {
+			return nil, fmt.Errorf("allowedListeners namespace selector: %w", err)
+		}
+	}
+
+	var list gwapiv1.ListenerSetList
+	if err := r.List(ctx, &list); err != nil {
+		return nil, err
+	}
+
+	var attached []gwapiv1.ListenerSet
+	for _, ls := range list.Items {
+		if !isGatewayRef(ls.Spec.ParentRef) || listenerSetParent(&ls) != (types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name}) {
+			continue
+		}
+
+		ok, err := r.namespaceAllowed(ctx, from, selector, gw.Namespace, ls.Namespace)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			attached = append(attached, ls)
+		}
+	}
+	return attached, nil
+}
+
+// namespaceAllowed reports whether a Gateway in gwNamespace allows the
+// ListenerSets of namespace, as configured by its allowedListeners.
+func (r *GatewayReconciler) namespaceAllowed(ctx context.Context, from gwapiv1.FromNamespaces, selector labels.Selector, gwNamespace, namespace string) (bool, error) {
+	switch from {
+	case gwapiv1.NamespacesFromAll:
+		return true, nil
+	case gwapiv1.NamespacesFromSame:
+		return namespace == gwNamespace, nil
+	case gwapiv1.NamespacesFromSelector:
+		var ns corev1.Namespace
+		if err := r.Get(ctx, types.NamespacedName{Name: namespace}, &ns); err != nil {
+			return false, client.IgnoreNotFound(err)
+		}
+		return selector.Matches(labels.Set(ns.Labels)), nil
+	default:
+		return false, nil
+	}
 }
 
 // resolveProxy resolves the TraefikProxy referenced by the Gateway's

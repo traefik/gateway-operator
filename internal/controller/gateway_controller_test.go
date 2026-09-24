@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -325,6 +326,115 @@ func TestReconcile_UsableStaticAddressProvisions(t *testing.T) {
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "app", Name: name}, &appsv1.Deployment{}); err != nil {
 		t.Fatalf("expected deployment once the address is realized: %v", err)
 	}
+}
+
+func TestReconcile_ListenerSetPorts(t *testing.T) {
+	testCases := []struct {
+		desc      string
+		allowed   *gwapiv1.AllowedListeners
+		lsNS      string
+		wantPorts []int32
+	}{
+		{
+			desc:      "not allowed by default",
+			lsNS:      "app",
+			wantPorts: []int32{8080},
+		},
+		{
+			desc:      "allowed from the same namespace",
+			allowed:   allowedListeners(gwapiv1.NamespacesFromSame, nil),
+			lsNS:      "app",
+			wantPorts: []int32{443, 8080},
+		},
+		{
+			desc:      "not allowed from another namespace",
+			allowed:   allowedListeners(gwapiv1.NamespacesFromSame, nil),
+			lsNS:      "other",
+			wantPorts: []int32{8080},
+		},
+		{
+			desc:      "allowed from all namespaces",
+			allowed:   allowedListeners(gwapiv1.NamespacesFromAll, nil),
+			lsNS:      "other",
+			wantPorts: []int32{443, 8080},
+		},
+		{
+			desc:      "allowed from a selected namespace",
+			allowed:   allowedListeners(gwapiv1.NamespacesFromSelector, &metav1.LabelSelector{MatchLabels: map[string]string{"listeners": "allowed"}}),
+			lsNS:      "selected",
+			wantPorts: []int32{443, 8080},
+		},
+		{
+			desc:      "not allowed from an unselected namespace",
+			allowed:   allowedListeners(gwapiv1.NamespacesFromSelector, &metav1.LabelSelector{MatchLabels: map[string]string{"listeners": "allowed"}}),
+			lsNS:      "other",
+			wantPorts: []int32{8080},
+		},
+	}
+
+	for _, test := range testCases {
+		t.Run(test.desc, func(t *testing.T) {
+			s := testScheme(t)
+			gc := gatewayClass("traefik", nil)
+			gw := testGateway("app", "gw", "traefik")
+			gw.Spec.AllowedListeners = test.allowed
+
+			ls := &gwapiv1.ListenerSet{
+				ObjectMeta: metav1.ObjectMeta{Namespace: test.lsNS, Name: "ls"},
+				Spec: gwapiv1.ListenerSetSpec{
+					ParentRef: gwapiv1.ParentGatewayReference{Name: "gw", Namespace: ptr.To(gwapiv1.Namespace("app"))},
+					Listeners: []gwapiv1.ListenerEntry{
+						{Name: "tls", Protocol: gwapiv1.TLSProtocolType, Port: 443},
+						{Name: "http", Protocol: gwapiv1.HTTPProtocolType, Port: 8080},
+					},
+				},
+			}
+			selected := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "selected", Labels: map[string]string{"listeners": "allowed"}}}
+			other := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "other"}}
+
+			cl := fake.NewClientBuilder().
+				WithScheme(s).
+				WithObjects(gc, gw, ls, selected, other).
+				WithStatusSubresource(&gwapiv1.Gateway{}).
+				Build()
+
+			r := &GatewayReconciler{Client: cl}
+			reconcile(t, r, gw)
+
+			var svc corev1.Service
+			if err := cl.Get(context.Background(), types.NamespacedName{Namespace: "app", Name: provisioner.ResourceName(gw)}, &svc); err != nil {
+				t.Fatalf("expected service: %v", err)
+			}
+			var ports []int32
+			for _, p := range svc.Spec.Ports {
+				ports = append(ports, p.Port)
+			}
+			if !slices.Equal(ports, test.wantPorts) {
+				t.Fatalf("expected service ports %v, got %v", test.wantPorts, ports)
+			}
+		})
+	}
+}
+
+func TestListenerSetGateway(t *testing.T) {
+	ls := &gwapiv1.ListenerSet{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "ls"},
+		Spec:       gwapiv1.ListenerSetSpec{ParentRef: gwapiv1.ParentGatewayReference{Name: "gw"}},
+	}
+	got := listenerSetGateway(context.Background(), ls)
+	want := []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: "app", Name: "gw"}}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+
+	ls.Spec.ParentRef.Kind = ptr.To(gwapiv1.Kind("Other"))
+	if got := listenerSetGateway(context.Background(), ls); got != nil {
+		t.Fatalf("expected no request for a non-Gateway parent, got %v", got)
+	}
+}
+
+func allowedListeners(from gwapiv1.FromNamespaces, selector *metav1.LabelSelector) *gwapiv1.AllowedListeners {
+	return &gwapiv1.AllowedListeners{Namespaces: &gwapiv1.ListenerNamespaces{From: &from, Selector: selector}}
 }
 
 func setServiceIngress(t *testing.T, cl client.Client, ns, name, ip string) {

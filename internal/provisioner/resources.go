@@ -52,16 +52,18 @@ type ResourceSet struct {
 }
 
 // Render builds the desired data plane resource set for a single Gateway,
-// applying the resolved TraefikProxy configuration. Resources are rendered in
-// namespace. Owner references are set by the caller.
-func Render(gw *gwapiv1.Gateway, proxy *v1alpha1.TraefikProxy, namespace string) *ResourceSet {
+// applying the resolved TraefikProxy configuration. The listenerSets are the
+// ListenerSets attached to the Gateway, whose listeners are served by the same
+// data plane. Resources are rendered in namespace. Owner references are set by
+// the caller.
+func Render(gw *gwapiv1.Gateway, listenerSets []gwapiv1.ListenerSet, proxy *v1alpha1.TraefikProxy, namespace string) *ResourceSet {
 	set := build(buildParams{
 		name:        ResourceName(gw),
 		namespace:   namespace,
 		selector:    SelectorLabels(gw),
 		labels:      commonLabels(gw),
 		annotations: infraAnnotations(gw),
-		ports:       listenerPorts(gw),
+		ports:       listenerPorts(gw, listenerSets),
 		refs:        []types.NamespacedName{{Namespace: gw.Namespace, Name: gw.Name}},
 		proxy:       proxy,
 	})
@@ -310,19 +312,20 @@ func metricsEnabled(proxy *v1alpha1.TraefikProxy) bool {
 	return proxy != nil && proxy.Spec.Metrics != nil && proxy.Spec.Metrics.Prometheus
 }
 
-func listenerPorts(gw *gwapiv1.Gateway) []int32 {
-	seen := map[int32]struct{}{}
+// listenerPorts returns the ports of the Gateway listeners and of the listeners
+// of its attached ListenerSets, which the data plane serves alongside them.
+func listenerPorts(gw *gwapiv1.Gateway, listenerSets []gwapiv1.ListenerSet) []int32 {
 	var ports []int32
 	for _, l := range gw.Spec.Listeners {
-		p := l.Port
-		if _, ok := seen[p]; ok {
-			continue
+		ports = append(ports, l.Port)
+	}
+	for _, ls := range listenerSets {
+		for _, l := range ls.Spec.Listeners {
+			ports = append(ports, l.Port)
 		}
-		seen[p] = struct{}{}
-		ports = append(ports, p)
 	}
 	slices.Sort(ports)
-	return ports
+	return slices.Compact(ports)
 }
 
 func containerPorts(ports []int32, proxy *v1alpha1.TraefikProxy) []corev1.ContainerPort {
