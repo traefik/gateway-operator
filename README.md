@@ -76,9 +76,9 @@ Single status writer per resource, no fights:
 
 ## Requirements
 
-- Kubernetes >= 1.31 (Gateway API v1.5 CRDs use CEL features absent from older
-  API servers).
-- [Gateway API v1.5.1](https://github.com/kubernetes-sigs/gateway-api/releases/tag/v1.5.1)
+- Kubernetes >= 1.32 (Gateway API v1.6 supports the five most recent Kubernetes
+  minor versions).
+- [Gateway API v1.6.1](https://github.com/kubernetes-sigs/gateway-api/releases/tag/v1.6.1)
   CRDs (experimental channel for TLSRoute/TCPRoute support).
 - A Traefik image carrying the `kubernetesGateway` provider option
   `gateway` (see
