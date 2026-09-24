@@ -158,7 +158,7 @@ func (r *GatewayReconciler) provisionGateway(ctx context.Context, gw *gwapiv1.Ga
 
 	listenerSets, err := r.attachedListenerSets(ctx, gw)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolving attached ListenerSets: %w", err)
 	}
 
 	set := provisioner.Render(gw, listenerSets, proxy, gw.Namespace)
@@ -313,13 +313,13 @@ func (r *GatewayReconciler) attachedListenerSets(ctx context.Context, gw *gwapiv
 	if from == gwapiv1.NamespacesFromSelector {
 		var err error
 		if selector, err = metav1.LabelSelectorAsSelector(allowed.Selector); err != nil {
-			return nil, fmt.Errorf("allowedListeners namespace selector: %w", err)
+			return nil, fmt.Errorf("parsing allowedListeners namespace selector: %w", err)
 		}
 	}
 
 	var list gwapiv1.ListenerSetList
 	if err := r.List(ctx, &list); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("listing ListenerSets: %w", err)
 	}
 
 	var attached []gwapiv1.ListenerSet
@@ -330,7 +330,7 @@ func (r *GatewayReconciler) attachedListenerSets(ctx context.Context, gw *gwapiv
 
 		ok, err := r.namespaceAllowed(ctx, from, selector, gw.Namespace, ls.Namespace)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("checking ListenerSet %s/%s namespace: %w", ls.Namespace, ls.Name, err)
 		}
 		if ok {
 			attached = append(attached, ls)
@@ -350,7 +350,10 @@ func (r *GatewayReconciler) namespaceAllowed(ctx context.Context, from gwapiv1.F
 	case gwapiv1.NamespacesFromSelector:
 		var ns corev1.Namespace
 		if err := r.Get(ctx, types.NamespacedName{Name: namespace}, &ns); err != nil {
-			return false, client.IgnoreNotFound(err)
+			if apierrors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, fmt.Errorf("getting namespace %q: %w", namespace, err)
 		}
 		return selector.Matches(labels.Set(ns.Labels)), nil
 	default:
