@@ -79,7 +79,8 @@ Single status writer per resource, no fights:
 - Kubernetes >= 1.32 (Gateway API v1.6 supports the five most recent Kubernetes
   minor versions).
 - [Gateway API v1.6.1](https://github.com/kubernetes-sigs/gateway-api/releases/tag/v1.6.1)
-  CRDs.
+  experimental channel CRDs (the `traefik:v3.7` data plane reads TCPRoute
+  `v1alpha2`).
 - A Traefik image carrying the `kubernetesGateway` provider option
   `gateway` (see
   [Data plane requirements](docs/configuration.md#data-plane-requirements)).
