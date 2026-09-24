@@ -6,16 +6,16 @@ Services (a cloud cluster, or kind with MetalLB or cloud-provider-kind).
 
 ## 1. Install the Gateway API CRDs
 
-The operator targets Gateway API v1.5.1. The experimental channel is required
-for `TLSRoute` and `TCPRoute` support:
+The operator targets Gateway API v1.6.1. The experimental channel is required,
+as the `traefik:v3.7` data plane reads TCPRoute `v1alpha2`:
 
 ```sh
 kubectl apply --server-side \
-  -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.5.1/experimental-install.yaml
+  -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.1/experimental-install.yaml
 ```
 
-Kubernetes >= 1.31 is required: the v1.5 CRDs use CEL validation features that
-older API servers reject.
+Kubernetes >= 1.32 is required: Gateway API v1.6 supports the five most recent
+Kubernetes minor versions.
 
 ## 2. Install the operator
 

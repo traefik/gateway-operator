@@ -50,7 +50,7 @@ func TestRender_Passthrough(t *testing.T) {
 	}
 	gw := mkGateway("app", "gw", listener("http", 80, gwapiv1.HTTPProtocolType, ""))
 
-	set := Render(gw, proxy, "app")
+	set := Render(gw, nil, proxy, "app")
 
 	// Autoscaling: HPA present, Deployment replicas left to the HPA.
 	if set.HPA == nil {
@@ -101,7 +101,7 @@ func TestRender_Passthrough(t *testing.T) {
 
 func TestRender_NoPassthrough(t *testing.T) {
 	gw := mkGateway("app", "gw", listener("http", 80, gwapiv1.HTTPProtocolType, ""))
-	set := Render(gw, nil, "app")
+	set := Render(gw, nil, nil, "app")
 
 	if set.HPA != nil || set.PodDisruptionBudget != nil {
 		t.Fatal("did not expect HPA or PDB without configuration")
@@ -122,7 +122,7 @@ func TestRender_NoPassthrough(t *testing.T) {
 
 func TestRender_ReportsServiceAddress(t *testing.T) {
 	gw := mkGateway("app", "gw", listener("http", 80, gwapiv1.HTTPProtocolType, ""))
-	set := Render(gw, nil, "app")
+	set := Render(gw, nil, nil, "app")
 
 	// The data plane reports the address of its own Service, so it owns the
 	// Gateway status.addresses in the normal case.

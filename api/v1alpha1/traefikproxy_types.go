@@ -157,7 +157,3 @@ type TraefikProxyList struct {
 
 	Items []TraefikProxy `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&TraefikProxy{}, &TraefikProxyList{})
-}
