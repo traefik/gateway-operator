@@ -38,6 +38,20 @@ type TraefikProxySpec struct {
 	// Tracing configures the data plane tracing.
 	// +optional
 	Tracing *TracingConfig `json:"tracing,omitempty"`
+
+	// Providers configures the data plane configuration providers.
+	// +optional
+	Providers *ProvidersConfig `json:"providers,omitempty"`
+}
+
+// ProvidersConfig configures the data plane configuration providers.
+type ProvidersConfig struct {
+	// ThrottleDuration is the minimum duration between two configuration
+	// reloads of the data plane. The data plane reports a route as accepted
+	// before the reload applying it, so a lower value shortens the time a
+	// route is accepted but not yet served. Traefik defaults to 2s.
+	// +optional
+	ThrottleDuration *metav1.Duration `json:"throttleDuration,omitempty"`
 }
 
 // AutoscalingConfig configures a HorizontalPodAutoscaler for the data plane.
