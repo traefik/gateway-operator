@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -46,6 +47,9 @@ func TestRender_Passthrough(t *testing.T) {
 			Logs:    &v1alpha1.LogsConfig{Level: "DEBUG"},
 			Metrics: &v1alpha1.MetricsConfig{Prometheus: true},
 			Tracing: &v1alpha1.TracingConfig{OTLPEndpoint: "http://otel:4318"},
+			Providers: &v1alpha1.ProvidersConfig{
+				ThrottleDuration: &metav1.Duration{Duration: 100 * time.Millisecond},
+			},
 		},
 	}
 	gw := mkGateway("app", "gw", listener("http", 80, gwapiv1.HTTPProtocolType, ""))
@@ -81,6 +85,7 @@ func TestRender_Passthrough(t *testing.T) {
 		"--metrics.prometheus.entryPoint=metrics",
 		"--tracing.otlp=true",
 		"--tracing.otlp.http.endpoint=http://otel:4318",
+		"--providers.providersThrottleDuration=100ms",
 	} {
 		if !hasArg(args, want) {
 			t.Fatalf("missing arg %q in %v", want, args)
@@ -117,6 +122,9 @@ func TestRender_NoPassthrough(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(args, " "), "--log.level") {
 		t.Fatal("did not expect a log level arg")
+	}
+	if strings.Contains(strings.Join(args, " "), "--providers.providersThrottleDuration") {
+		t.Fatal("did not expect a providers throttle duration arg")
 	}
 }
 

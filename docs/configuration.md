@@ -46,6 +46,9 @@ spec:
 
   tracing:
     otlpEndpoint: http://otel-collector:4318
+
+  providers:
+    throttleDuration: 2s
 ```
 
 ### deployment
@@ -75,13 +78,18 @@ targeting the data plane Deployment and stops managing the replica count.
 `podDisruptionBudget` creates a `PodDisruptionBudget` selecting the data plane
 Pods. Both are removed when their configuration is removed.
 
-### logs, metrics, tracing
+### logs, metrics, tracing, providers
 
 | Field | Effect on the data plane |
 |---|---|
 | `logs.level` | `--log.level=<level>` |
 | `metrics.prometheus: true` | dedicated `metrics` entry point on container port 9100, `--metrics.prometheus` |
 | `tracing.otlpEndpoint` | `--tracing.otlp.http.endpoint=<endpoint>` |
+| `providers.throttleDuration` | `--providers.providersThrottleDuration=<duration>` |
+
+The data plane reports a route as accepted before the configuration reload that serves it.
+`providers.throttleDuration` bounds that delay (Traefik defaults to 2s):
+lower it when clients expect an accepted route to be served right away, as the conformance suite does.
 
 ## Operator flags
 

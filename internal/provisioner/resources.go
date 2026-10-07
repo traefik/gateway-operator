@@ -305,6 +305,9 @@ func containerArgs(p buildParams) []string {
 			"--tracing.otlp.http.endpoint="+proxy.Spec.Tracing.OTLPEndpoint,
 		)
 	}
+	if proxy.Spec.Providers != nil && proxy.Spec.Providers.ThrottleDuration != nil {
+		args = append(args, "--providers.providersThrottleDuration="+proxy.Spec.Providers.ThrottleDuration.Duration.String())
+	}
 	return args
 }
 
