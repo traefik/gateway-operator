@@ -37,7 +37,10 @@ const (
 // for a Gateway: traefik-<ns>-<name>-<hash>, truncated to stay within DNS and
 // label limits. The hash disambiguates names that collide after truncation.
 func ResourceName(gw *gwapiv1.Gateway) string {
-	base := fmt.Sprintf("traefik-%s-%s", gw.Namespace, gw.Name)
+	// Gateway names are DNS-1123 subdomains and may contain dots, but the
+	// Service name must be a DNS-1035 label. Dots are replaced with dashes; the
+	// hash of the original name keeps "my.gw" and "my-gw" distinct.
+	base := strings.ReplaceAll(fmt.Sprintf("traefik-%s-%s", gw.Namespace, gw.Name), ".", "-")
 	if len(base) > maxHashedBase {
 		base = base[:maxHashedBase]
 	}
