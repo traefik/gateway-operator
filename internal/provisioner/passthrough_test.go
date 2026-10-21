@@ -145,3 +145,33 @@ func TestRender_ReportsServiceAddress(t *testing.T) {
 		}
 	}
 }
+
+func TestRender_SelectorLabelsWin(t *testing.T) {
+	gw := mkGateway("app", "gw", listener("http", 80, gwapiv1.HTTPProtocolType, ""))
+	gw.Spec.Infrastructure = &gwapiv1.GatewayInfrastructure{
+		Labels: map[gwapiv1.LabelKey]gwapiv1.LabelValue{GatewayNameLabel: "other", "team": "a"},
+	}
+	proxy := &v1alpha1.TraefikProxy{
+		Spec: v1alpha1.TraefikProxySpec{
+			Deployment: &v1alpha1.DeploymentConfig{PodLabels: map[string]string{ManagedByLabel: "other"}},
+		},
+	}
+	set := Render(gw, nil, proxy, "app")
+
+	// Propagated and pod labels must not override the selector, or the
+	// Deployment and Service would no longer match the pods.
+	for name, labels := range map[string]map[string]string{
+		"deployment": set.Deployment.Labels,
+		"pod":        set.Deployment.Spec.Template.Labels,
+		"service":    set.Service.Labels,
+	} {
+		for k, v := range SelectorLabels(gw) {
+			if labels[k] != v {
+				t.Fatalf("%s label %s = %q, want %q", name, k, labels[k], v)
+			}
+		}
+		if labels["team"] != "a" {
+			t.Fatalf("expected %s to carry the propagated team label, got %v", name, labels)
+		}
+	}
+}

@@ -122,8 +122,9 @@ func build(p buildParams) *ResourceSet {
 					// Pods carry the full label/annotation set (including
 					// propagated spec.infrastructure metadata, required by the
 					// GatewayInfrastructure conformance test). The selector stays
-					// the stable subset.
-					Labels:      mergeMaps(p.labels, podLabels(p.proxy)),
+					// the stable subset, applied last so pod labels cannot
+					// override it.
+					Labels:      mergeMaps(mergeMaps(p.labels, podLabels(p.proxy)), p.selector),
 					Annotations: mergeMaps(p.annotations, podAnnotations(p.proxy)),
 				},
 				Spec: corev1.PodSpec{
@@ -240,14 +241,16 @@ func applyStaticAddresses(svc *corev1.Service, gw *gwapiv1.Gateway) {
 }
 
 // commonLabels carries the operator markers plus the propagated
-// spec.infrastructure.labels (GatewayInfrastructurePropagation).
+// spec.infrastructure.labels (GatewayInfrastructurePropagation). The selector
+// labels win over propagated ones so resources keep matching their selector.
 func commonLabels(gw *gwapiv1.Gateway) map[string]string {
-	l := SelectorLabels(gw)
+	l := map[string]string{}
 	if gw.Spec.Infrastructure != nil {
 		for k, v := range gw.Spec.Infrastructure.Labels {
 			l[string(k)] = string(v)
 		}
 	}
+	maps.Copy(l, SelectorLabels(gw))
 	return l
 }
 

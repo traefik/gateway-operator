@@ -33,4 +33,5 @@ Label values are limited to 63 characters, so a Gateway name longer than that
 is truncated and suffixed with a hash in the `gateway-name` label.
 
 `spec.infrastructure.labels` and `annotations` from the Gateway are added to
-every generated resource, including the Pod template.
+every generated resource, including the Pod template. They cannot override the
+labels above, which the Deployment and Service selectors rely on.

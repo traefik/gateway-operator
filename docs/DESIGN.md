@@ -136,7 +136,8 @@ and DNS limits, mirroring Envoy Gateway. All resources carry:
   `GatewayInfrastructure` conformance test). Names over 63 characters, the
   label value limit, are truncated and suffixed with a hash.
 - `app.kubernetes.io/managed-by: traefik-gateway-operator`
-- the Gateway `spec.infrastructure.labels` and `annotations`
+- the Gateway `spec.infrastructure.labels` and `annotations`, which cannot
+  override the labels above (the selectors rely on them)
 
 Resources set `metadata.ownerReferences` to the Gateway so Kubernetes garbage
 collects them when the Gateway is deleted. The only exception is the
