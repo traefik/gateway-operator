@@ -42,8 +42,10 @@ const (
 // ResourceName returns the deterministic name of the resource set provisioned
 // for a Gateway: traefik-<ns>-<name>-<hash>, truncated to stay within DNS and
 // label limits. The hash disambiguates names that collide after truncation.
+// Dots allowed in Gateway names are replaced, as Service names must be DNS-1035
+// labels.
 func ResourceName(gw *gwapiv1.Gateway) string {
-	return hashedName(fmt.Sprintf("traefik-%s-%s", gw.Namespace, gw.Name), gw.Namespace+"/"+gw.Name)
+	return strings.ReplaceAll(hashedName(fmt.Sprintf("traefik-%s-%s", gw.Namespace, gw.Name)), ".", "-")
 }
 
 // LabelName returns v unchanged when it fits the 63 character label value
@@ -53,16 +55,16 @@ func LabelName(v string) string {
 	if len(v) <= maxNameLength {
 		return v
 	}
-	return hashedName(v, v)
+	return hashedName(v)
 }
 
 // hashedName returns base truncated to fit with a dash and the first 8 hex
-// chars of the sha256 of key.
-func hashedName(base, key string) string {
+// chars of the sha256 of the full base.
+func hashedName(base string) string {
+	sum := sha256.Sum256([]byte(base))
 	if len(base) > maxHashedBase {
 		base = base[:maxHashedBase]
 	}
-	sum := sha256.Sum256([]byte(key))
 	// Names and label values must end with an alphanumeric character.
 	return strings.TrimRight(base, "-_.") + "-" + hex.EncodeToString(sum[:])[:8]
 }

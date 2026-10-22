@@ -4,8 +4,33 @@ import (
 	"strings"
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
+
+func TestResourceName(t *testing.T) {
+	tests := []struct {
+		name       string
+		gwName     string
+		wantPrefix string
+	}{
+		{name: "short name", gwName: "gw", wantPrefix: "traefik-app-gw-"},
+		{name: "dots replaced", gwName: "gw.example.com", wantPrefix: "traefik-app-gw-example-com-"},
+		{name: "long name truncated", gwName: strings.Repeat("a.", 126) + "a", wantPrefix: "traefik-app-" + strings.Repeat("a-", 21)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ResourceName(&gwapiv1.Gateway{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: tt.gwName}})
+			if errs := validation.IsDNS1035Label(got); len(errs) > 0 {
+				t.Fatalf("invalid service name %q: %v", got, errs)
+			}
+			if !strings.HasPrefix(got, tt.wantPrefix) {
+				t.Fatalf("got %q, want prefix %q", got, tt.wantPrefix)
+			}
+		})
+	}
+}
 
 func TestLabelName(t *testing.T) {
 	long := strings.Repeat("a", 253)
