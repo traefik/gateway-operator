@@ -29,5 +29,8 @@ Generated resources are named `traefik-<gateway-namespace>-<gateway-name>-<hash>
 | `gateway.traefik.io/gateway-namespace` | Gateway namespace, keeps selectors unambiguous |
 | `app.kubernetes.io/managed-by: traefik-gateway-operator` | operator marker |
 
+Label values are limited to 63 characters, so a Gateway name longer than that
+is truncated and suffixed with a hash in the `gateway-name` label.
+
 `spec.infrastructure.labels` and `annotations` from the Gateway are added to
 every generated resource, including the Pod template.

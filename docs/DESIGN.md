@@ -133,7 +133,8 @@ Naming: `traefik-<gateway-namespace>-<gateway-name>-<hash>` to stay within label
 and DNS limits, mirroring Envoy Gateway. All resources carry:
 
 - `gateway.networking.k8s.io/gateway-name: <gateway-name>` (required by the
-  `GatewayInfrastructure` conformance test)
+  `GatewayInfrastructure` conformance test). Names over 63 characters, the
+  label value limit, are truncated and suffixed with a hash.
 - `app.kubernetes.io/managed-by: traefik-gateway-operator`
 - the Gateway `spec.infrastructure.labels` and `annotations`
 

@@ -76,10 +76,10 @@ func Render(gw *gwapiv1.Gateway, listenerSets []gwapiv1.ListenerSet, proxy *v1al
 
 // SelectorLabels identify the data plane resources of a Gateway. They are
 // stable and must not include propagated infrastructure labels (those can
-// change).
+// change). The Gateway name is shortened when it exceeds the label value limit.
 func SelectorLabels(gw *gwapiv1.Gateway) map[string]string {
 	return map[string]string{
-		GatewayNameLabel:      gw.Name,
+		GatewayNameLabel:      LabelName(gw.Name),
 		GatewayNamespaceLabel: gw.Namespace,
 		ManagedByLabel:        ManagedByValue,
 	}
