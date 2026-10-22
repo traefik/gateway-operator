@@ -7,7 +7,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
-func TestLabelValue(t *testing.T) {
+func TestLabelName(t *testing.T) {
 	long := strings.Repeat("a", 253)
 
 	tests := []struct {
@@ -23,7 +23,7 @@ func TestLabelValue(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := LabelValue(tt.value)
+			got := LabelName(tt.value)
 			if errs := validation.IsValidLabelValue(got); len(errs) > 0 {
 				t.Fatalf("invalid label value %q: %v", got, errs)
 			}
@@ -33,7 +33,7 @@ func TestLabelValue(t *testing.T) {
 		})
 	}
 
-	if LabelValue(long) == LabelValue(long+"b") {
+	if LabelName(long) == LabelName(long+"b") {
 		t.Fatal("expected distinct long values to produce distinct label values")
 	}
 }

@@ -31,37 +31,38 @@ const (
 
 	// DefaultImage is the data plane image used when none is configured.
 	DefaultImage = "traefik:v3.7"
+
+	// DNS label and label value limit.
+	maxNameLength = 63
+
+	// Room for a dash and 8 hash chars.
+	maxHashedBase = maxNameLength - 1 - 8
 )
 
 // ResourceName returns the deterministic name of the resource set provisioned
 // for a Gateway: traefik-<ns>-<name>-<hash>, truncated to stay within DNS and
 // label limits. The hash disambiguates names that collide after truncation.
 func ResourceName(gw *gwapiv1.Gateway) string {
-	base := fmt.Sprintf("traefik-%s-%s", gw.Namespace, gw.Name)
-	if len(base) > maxHashedBase {
-		base = base[:maxHashedBase]
-	}
-	return base + "-" + hashSuffix(gw.Namespace+"/"+gw.Name)
+	return hashedName(fmt.Sprintf("traefik-%s-%s", gw.Namespace, gw.Name), gw.Namespace+"/"+gw.Name)
 }
 
-// LabelValue returns v unchanged when it fits the 63 character label value
+// LabelName returns v unchanged when it fits the 63 character label value
 // limit, otherwise a truncated value suffixed with a hash of v so that distinct
 // long values stay distinct. Gateway names can be up to 253 characters.
-func LabelValue(v string) string {
+func LabelName(v string) string {
 	if len(v) <= maxNameLength {
 		return v
 	}
-	// Label values must start and end with an alphanumeric character.
-	return strings.TrimRight(v[:maxHashedBase], "-_.") + "-" + hashSuffix(v)
+	return hashedName(v, v)
 }
 
-const (
-	maxNameLength = 63                    // DNS label and label value limit.
-	maxHashedBase = maxNameLength - 1 - 8 // Room for a dash and 8 hash chars.
-)
-
-// hashSuffix returns the first 8 hex chars of the sha256 of key.
-func hashSuffix(key string) string {
+// hashedName returns base truncated to fit with a dash and the first 8 hex
+// chars of the sha256 of key.
+func hashedName(base, key string) string {
+	if len(base) > maxHashedBase {
+		base = base[:maxHashedBase]
+	}
 	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:])[:8]
+	// Names and label values must end with an alphanumeric character.
+	return strings.TrimRight(base, "-_.") + "-" + hex.EncodeToString(sum[:])[:8]
 }
